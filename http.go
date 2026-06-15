@@ -162,7 +162,15 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	buf := new(bytes.Buffer)
+
+	defer func() {
+		switch cate {
+		case "user":
+			infos.TCPStatus.User.WakeTime = time.Now()
+		case "bot":
+			infos.TCPStatus.Bot.WakeTime = time.Now()
+		}
+	}()
 
 	// 从媒体中查找最大的 PhotoSize
 	var actualThumb telegram.PhotoSize
@@ -209,6 +217,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	buf := new(bytes.Buffer)
 	_, err = infos.Client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
 		ThumbOnly: true,
 		ThumbSize: actualThumb,
