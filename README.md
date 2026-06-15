@@ -175,6 +175,26 @@ docker run -d --name tgfilebot -p 8080:8080 -v $(pwd)/files:/root/files tgfilebo
 
 ---
 
+### `GET /pic` — 缩略图获取接口
+
+获取指定 Telegram 媒体文件（视频、图片、文档）的最大尺寸缩略图。
+
+**URL 格式**:
+```
+/pic?cid={cid}&mid={mid}&cate={bot|user}&key={key}
+```
+
+| 参数 | 必填 | 说明 |
+|:---|:---:|:---|
+| `cid` | 否 | 频道 ID（负数形式，如 `-1001234567890`）。若 `config.json` 中已设置 `channelID` 则可省略 |
+| `mid` | 是 | 消息 ID（正整数）|
+| `cate` | 否 | 下载客户端选择：`user`（使用 UserBot，可访问私有频道）或 `bot`（默认） |
+| `key` / `hash` / `uid` | 否* | 鉴权参数（设置了 `password` 时必填其一）|
+
+> 该接口返回图片格式通常为 `image/jpeg`。若对应的消息没有缩略图，则返回 `404 Not Found`。
+
+---
+
 ### `GET /link` — 链接解析跳转接口
 
 将 Telegram 消息链接解析为直链，并以 **302 重定向** 返回。

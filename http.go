@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -39,17 +40,20 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 			log.Printf("发送网页失败: %+v", err)
 		}
 		return
-	case strings.HasPrefix(path, "/link"):
+	case path == "/search":
+		// 处理搜索
+		handleSearch(w, r)
+		return
+	case path == "/pic":
+		handlePic(w, r)
+		return
+	case path == "/link":
 		// 处理链接直链提取并跳转
 		handleLink(w, r)
 		return
 	case strings.HasPrefix(path, "/stream"):
 		// 处理文件分片流式下载（串流播放）核心接口
 		handleStream(w, r)
-		return
-	case strings.HasPrefix(path, "/search"):
-		// 处理搜索
-		handleSearch(w, r)
 		return
 	default:
 		// 404
@@ -64,6 +68,7 @@ func handleStreamParams(r *http.Request) (cid int64, mid int32, cate string, err
 	if err = checkPass(params); err != nil {
 		return 0, 0, "", err
 	}
+
 	cid, err = strconv.ParseInt(params.Get("cid"), 10, 64)
 	if err != nil || cid == 0 {
 		if infos.Conf.ChannelID != 0 {
@@ -72,6 +77,7 @@ func handleStreamParams(r *http.Request) (cid int64, mid int32, cate string, err
 			return 0, 0, "", fmt.Errorf("频道ID无效")
 		}
 	}
+
 	value, err := strconv.ParseInt(params.Get("mid"), 10, 32)
 	if err != nil || value == 0 {
 		re := regexp.MustCompile(`/stream/(\d+)/[a-zA-Z0-9]+`)
@@ -136,6 +142,89 @@ func handleRanHeader(src string, size int64) (start, end int64) {
 	return start, end
 }
 
+func handlePic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, fmt.Sprintf("不支持的请求方法: %s", r.Method), http.StatusMethodNotAllowed)
+		return
+	}
+	cid, mid, cate, err := handleStreamParams(r)
+	if err != nil {
+		if err.Error() == "频道ID无效" || err.Error() == "消息ID无效" {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		} else {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+		}
+		return
+	}
+
+	cate, src, err := infos.handleMs(cid, mid, cate)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	buf := new(bytes.Buffer)
+
+	// 从媒体中查找最大的 PhotoSize
+	var actualThumb telegram.PhotoSize
+	var maxSize int32
+
+	updateMax := func(s telegram.PhotoSize) {
+		switch sz := s.(type) {
+		case *telegram.PhotoSizeObj:
+			if sz.Size > maxSize {
+				maxSize = sz.Size
+				actualThumb = sz
+			}
+		case *telegram.PhotoSizeProgressive:
+			var sMax int32
+			for _, m := range sz.Sizes {
+				if m > sMax {
+					sMax = m
+				}
+			}
+			if sMax > maxSize {
+				maxSize = sMax
+				actualThumb = sz
+			}
+		}
+	}
+
+	switch m := src.Media().(type) {
+	case *telegram.MessageMediaPhoto:
+		if p, ok := m.Photo.(*telegram.PhotoObj); ok {
+			for _, s := range p.Sizes {
+				updateMax(s)
+			}
+		}
+	case *telegram.MessageMediaDocument:
+		if d, ok := m.Document.(*telegram.DocumentObj); ok {
+			for _, s := range d.Thumbs {
+				updateMax(s)
+			}
+		}
+	}
+
+	if actualThumb == nil {
+		http.Error(w, "未找到缩略图", http.StatusNotFound)
+		return
+	}
+
+	_, err = infos.Client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
+		ThumbOnly: true,
+		ThumbSize: actualThumb,
+		Buffer:    buf,
+		Ctx:       r.Context(),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
+	w.Write(buf.Bytes())
+}
+
 // handleStream 处理来自 HTTP 的文件流式读取请求
 // 该函数实现了 Range 分段下载支持, 允许像播放普通 mp4 文件一样拖动进度条
 func handleStream(w http.ResponseWriter, r *http.Request) {
@@ -156,60 +245,9 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. 选择下载客户端 (Bot 或 UserBot)
-	if cate == "user" && infos.Status.Load() == 3 {
-		infos.Client = infos.UserClient
-	} else {
-		cate = "bot"
-		infos.Client = infos.BotClient
-	}
-
-	switch cate {
-	case "user":
-		if time.Since(infos.TCPStatus.User.WakeTime).Minutes() > 30 {
-			if err := infos.wakeTCP(cate); err != nil {
-				log.Printf("唤醒 TCP 连接失败: %+v", err)
-			}
-		} else {
-			diff := time.Since(infos.TCPStatus.User.WakeTime)
-			minutes := int(diff.Minutes())
-			seconds := int(diff.Seconds()) % 60
-			if minutes != 0 {
-				log.Printf("TCP 链路正常, %02d分%02d秒前唤醒", minutes, seconds)
-			} else {
-				log.Printf("TCP 链路正常, %02d秒前唤醒", seconds)
-			}
-		}
-	case "bot":
-		if time.Since(infos.TCPStatus.Bot.WakeTime).Minutes() > 30 {
-			if err := infos.wakeTCP(cate); err != nil {
-				log.Printf("唤醒 TCP 连接失败: %+v", err)
-			}
-		} else {
-			diff := time.Since(infos.TCPStatus.Bot.WakeTime)
-			minutes := int(diff.Minutes())
-			seconds := int(diff.Seconds()) % 60
-			if minutes != 0 {
-				log.Printf("TCP 链路正常, %02d分%02d秒前唤醒", minutes, seconds)
-			} else {
-				log.Printf("TCP 链路正常, %02d秒前唤醒", seconds)
-			}
-		}
-	}
-
-	// 4. 从 Telegram 获取指定消息
-	ms, err := infos.Client.GetMessages(cid, &telegram.SearchOption{IDs: []int32{mid}})
-	if err != nil || len(ms) == 0 {
-		log.Printf("获取消息失败: cid=%d, mid=%d, err=%v, count=%d", cid, mid, err, len(ms))
-		http.Error(w, fmt.Sprintf("获取消息失败: cid=%d, mid=%d, err=%v, count=%d", cid, mid, err, len(ms)), http.StatusNotFound)
-		return
-	}
-	src := ms[0]
-
-	// 5. 确保消息包含媒体文件并获取元数据
-	if !src.IsMedia() {
-		log.Printf("消息不包含媒体: cid=%d, mid=%d", cid, mid)
-		http.Error(w, fmt.Sprintf("消息不包含媒体: cid=%d, mid=%d", cid, mid), http.StatusBadRequest)
+	cate, src, err := infos.handleMs(cid, mid, cate)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
 

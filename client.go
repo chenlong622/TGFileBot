@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -623,4 +624,188 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 		}
 	}
 	return conf
+}
+
+// search 在指定频道中搜索关键词并返回匹配的媒体文件列表
+func (infos *Infos) search(channel, keywords string, page, limit int, offset int32) (items Items, err error) {
+	if waitUntil := infos.WaitUntil.Load(); waitUntil > 0 {
+		if remaining := time.Until(time.Unix(waitUntil, 0)); remaining > 0 {
+			log.Printf("搜索: 检测到FloodWait, 等待 %.2f 秒", remaining.Seconds())
+			time.Sleep(remaining)
+		}
+	}
+
+	ch, err := infos.UserClient.ResolvePeer(fmt.Sprintf("@%s", channel))
+	if err != nil {
+		log.Printf("频道解析失败: %+v", err)
+		return items, err
+	}
+	if offset == 0 {
+		offSets.Mutex.Lock()
+		key := fmt.Sprintf("%s|%s|%d", channel, keywords, page)
+		if values, ok := offSets.OffSets[key]; ok && time.Since(values.Time) < time.Hour {
+			offset = values.Offset
+		}
+		offSets.Mutex.Unlock()
+		if page > 1 && offset == 0 {
+			return items, errors.New("未找到匹配消息")
+		}
+	}
+
+	ms, err := infos.UserClient.GetMessages(ch, &telegram.SearchOption{
+		Query:  keywords,
+		Limit:  int32(limit),
+		Offset: offset,
+		Filter: &telegram.InputMessagesFilterVideo{},
+	})
+
+	if err != nil {
+		return items, err
+	}
+	if len(ms) == 0 {
+		return items, errors.New("未找到匹配消息")
+	}
+
+	if len(ms) == limit {
+		items.HasMore = true
+		key := fmt.Sprintf("%s|%s|%d", channel, keywords, page+1)
+		offSets.Mutex.Lock()
+		offSets.OffSets[key] = OffSet{
+			Offset: ms[len(ms)-1].ID,
+			Time:   time.Now(),
+		}
+		offSets.Mutex.Unlock()
+	}
+
+	slices.Reverse(ms)
+	maxCount := 3
+	rids := make(map[int64]bool)
+	mids := make([]int32, 0, len(ms)*maxCount)
+	seen := make(map[int32]bool)
+	for _, m := range ms {
+		if m.File == nil {
+			continue
+		}
+		if m.Message.GroupedID != 0 {
+			for num := 0; num < maxCount; num++ {
+				mid := m.ID + int32(num)
+				if value, ok := seen[mid]; ok && value {
+					continue
+				}
+				seen[mid] = true
+				mids = append(mids, mid)
+				rids[m.Message.GroupedID] = true
+			}
+		} else {
+			mids = append(mids, m.ID)
+		}
+	}
+
+	results := [][]telegram.NewMessage{ms}
+
+	if len(rids) > 0 {
+		results = make([][]telegram.NewMessage, 0, (len(mids)/100)+1)
+		for chunk := range slices.Chunk(mids, 100) {
+			ms, err = infos.UserClient.GetMessages(ch, &telegram.SearchOption{
+				IDs:    chunk,
+				Limit:  100,
+				Filter: &telegram.InputMessagesFilterVideo{},
+			})
+			if err != nil {
+				continue
+			}
+			results = append(results, ms)
+		}
+	}
+
+	for _, ms := range results {
+		for _, m := range ms {
+			if m.File == nil {
+				continue
+			}
+			if len(rids) > 0 {
+				if value, ok := rids[m.Message.GroupedID]; !ok || !value {
+					continue
+				}
+			}
+
+			if items.Channel == "" {
+				items.Channel = strings.TrimSpace(m.Channel.Title)
+			}
+
+			name := strings.TrimSpace(m.File.Name)
+			if name == "" {
+				name = strings.TrimSpace(m.Text())
+			}
+
+			items.Item = append(items.Item, Item{
+				Name: name,
+				Size: m.File.Size,
+				CID:  m.Channel.ID,
+				MID:  m.ID,
+			})
+		}
+	}
+	return items, nil
+}
+
+// selectClient 根据当前网络延迟选择最佳客户端
+func (infos *Infos) handleMs(cid int64, mid int32, cate string) (result string, src telegram.NewMessage, err error) {
+	// 3. 选择下载客户端 (Bot 或 UserBot)
+	if cate == "user" && infos.Status.Load() == 3 {
+		infos.Client = infos.UserClient
+	} else {
+		cate = "bot"
+		infos.Client = infos.BotClient
+	}
+	result = cate
+
+	switch cate {
+	case "user":
+		if time.Since(infos.TCPStatus.User.WakeTime).Minutes() > 30 {
+			if err := infos.wakeTCP(cate); err != nil {
+				log.Printf("唤醒 TCP 连接失败: %+v", err)
+			}
+		} else {
+			diff := time.Since(infos.TCPStatus.User.WakeTime)
+			minutes := int(diff.Minutes())
+			seconds := int(diff.Seconds()) % 60
+			if minutes != 0 {
+				log.Printf("TCP 链路正常, %02d分%02d秒前唤醒", minutes, seconds)
+			} else {
+				log.Printf("TCP 链路正常, %02d秒前唤醒", seconds)
+			}
+		}
+	case "bot":
+		if time.Since(infos.TCPStatus.Bot.WakeTime).Minutes() > 30 {
+			if err := infos.wakeTCP(cate); err != nil {
+				log.Printf("唤醒 TCP 连接失败: %+v", err)
+			}
+		} else {
+			diff := time.Since(infos.TCPStatus.Bot.WakeTime)
+			minutes := int(diff.Minutes())
+			seconds := int(diff.Seconds()) % 60
+			if minutes != 0 {
+				log.Printf("TCP 链路正常, %02d分%02d秒前唤醒", minutes, seconds)
+			} else {
+				log.Printf("TCP 链路正常, %02d秒前唤醒", seconds)
+			}
+		}
+	}
+
+	ms, err := infos.Client.GetMessages(cid, &telegram.SearchOption{IDs: []int32{mid}})
+	if err != nil || len(ms) == 0 {
+		err = fmt.Errorf("获取消息失败: cid=%d, mid=%d, err=%v, count=%d", cid, mid, err, len(ms))
+		log.Print(err.Error())
+		return
+	}
+	
+	src = ms[0]
+	if !src.IsMedia() {
+		err = fmt.Errorf("消息不包含媒体: cid=%d, mid=%d", cid, mid)
+		log.Print(err.Error())
+		return
+	}
+
+	return
 }
