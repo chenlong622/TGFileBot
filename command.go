@@ -22,7 +22,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 	text := strings.TrimSpace(m.Text())
 
 	// 拦截非管理指令并匹配正则过滤规则 [FEAT-002]
-	if !m.IsMedia() && text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "http") {
+	if !m.IsMedia() && text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "http") && m.SenderID() != 0 && !infos.isWhite(m.SenderID()) {
 		infos.Mutex.RLock()
 		rexRules := infos.RexRules
 		infos.Mutex.RUnlock()

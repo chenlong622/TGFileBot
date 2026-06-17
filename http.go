@@ -62,8 +62,8 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleStreamParams 解析流式下载请求参数
-func handleStreamParams(r *http.Request) (cid int64, mid int32, cate string, err error) {
+// handleParams 解析流式下载请求参数
+func handleParams(r *http.Request) (cid int64, mid int32, cate string, err error) {
 	params := r.URL.Query()
 	if err = checkPass(params); err != nil {
 		return 0, 0, "", err
@@ -147,7 +147,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("不支持的请求方法: %s", r.Method), http.StatusMethodNotAllowed)
 		return
 	}
-	cid, mid, cate, err := handleStreamParams(r)
+	cid, mid, cate, err := handleParams(r)
 	if err != nil {
 		if err.Error() == "频道ID无效" || err.Error() == "消息ID无效" {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -216,10 +216,9 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "未找到缩略图", http.StatusNotFound)
 		return
 	}
-	
-	if infos.Conf.DeBUG {
-		log.Printf("开始下载封面: cid=%d, mid=%d, name=%s", cid, mid, src.File.Name)
-	}
+
+	clientIP := GetClientIP(r)
+	log.Printf("正在处理来自 %s 的请求, 开始下载封面, cid=%d, mid=%d, name=%s", clientIP, cid, mid, src.File.Name)
 
 	buf := new(bytes.Buffer)
 	_, err = infos.Client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
@@ -248,7 +247,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1-2. 获取 URL 参数、完成身份校验、解析频道 ID 和消息 ID
-	cid, mid, cate, err := handleStreamParams(r)
+	cid, mid, cate, err := handleParams(r)
 	if err != nil {
 		if err.Error() == "频道ID无效" || err.Error() == "消息ID无效" {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -312,9 +311,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if infos.Conf.DeBUG {
-		log.Printf("开始下载: cid=%d, mid=%d, name=%s, start=%d, end=%d", cid, mid, fileName, start, end)
-	}
+	clientIP := GetClientIP(r)
+	log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s, start=%d, end=%d", clientIP, cid, mid, fileName, start, end)
 
 	// 缓存逻辑：检查头部/尾部缓存是否命中, 并决定实际下载起点
 	stream.HeadSize, stream.TailSize = mediaCacheSizes(size)
@@ -428,6 +426,9 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	if err != nil || limit <= 0 {
 		limit = 20
 	}
+
+	clientIP := GetClientIP(r)
+	log.Printf("正在处理来自 %s 的请求, 开始搜索, page=%d, offset=%d, limit=%d, keywords=%s", clientIP, page, offset, limit, keywords)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()

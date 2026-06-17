@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -162,4 +164,34 @@ func cleanFiles(realm CleanRealm) {
 // isNumber 判断 rune 是否为数字字符（供 submitCode 过滤验证码使用）
 func isNumber(r rune) bool {
 	return r >= '0' && r <= '9'
+}
+
+// GetClientIP 从http.Request中提取客户端真实IP，支持代理场景和IPv6
+func GetClientIP(r *http.Request) string {
+	// 1. 优先处理X-Forwarded-For（代理场景）
+	xForwardedFor := r.Header.Get("X-Forwarded-For")
+	if xForwardedFor != "" {
+		// 格式："clientIP, proxy1IP, proxy2IP"，取第一个非空IP
+		parts := strings.Split(xForwardedFor, ",")
+		for _, part := range parts {
+			ip := strings.TrimSpace(part)
+			if ip != "" {
+				return ip
+			}
+		}
+	}
+
+	// 2. 其次处理X-Real-IP（代理常用）
+	xRealIP := r.Header.Get("X-Real-IP")
+	if xRealIP != "" {
+		return xRealIP
+	}
+
+	// 3. 最后从RemoteAddr获取（直接连接场景）
+	if ip, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return ip
+	}
+
+	// 4. 所有方式失败时返回默认值
+	return "未知IP"
 }
