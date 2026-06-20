@@ -557,13 +557,27 @@ func handleLink(w http.ResponseWriter, r *http.Request) {
 	res.Hash = params.Get("hash")
 
 	// 4. 调用解析核心逻辑提取直链
-	for _, link := range hackLink(res) {
-		// 成功提取到直链后执行 302 重定向
-		http.Redirect(w, r, link, http.StatusFound)
+	/*
+		for _, link := range hackLink(res) {
+			// 成功提取到直链后执行 302 重定向
+			http.Redirect(w, r, link, http.StatusFound)
+			return
+		}
+	*/
+	links := hackLink(res)
+	if len(links) == 0 {
+		http.Error(w, "未找到可下载的媒体", http.StatusNotFound)
 		return
 	}
 
-	http.Error(w, "未找到可下载的媒体", http.StatusNotFound)
+	result, err := json.Marshal(links)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
 }
 
 // handleMediaCate 根据文件扩展名返回对应的 MIME 类型
