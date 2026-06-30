@@ -675,6 +675,7 @@ func (infos *Infos) list(channel string, page, limit int, filter int64) (items I
 		handleOffset("set", fmt.Sprintf("%s|%d", channel, page+1), ms[len(ms)-1].ID)
 	}
 
+	slices.Reverse(ms)
 	for _, m := range ms {
 		if m.File == nil {
 			continue
