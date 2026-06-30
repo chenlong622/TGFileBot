@@ -681,7 +681,7 @@ func (infos *Infos) list(channel string, page, limit int, filter int64) (items I
 		}
 
 		size := m.File.Size
-		if size < filter {
+		if IsVideoFile(m.File.Ext) && size < filter {
 			continue
 		}
 
@@ -697,7 +697,7 @@ func (infos *Infos) list(channel string, page, limit int, filter int64) (items I
 		name = strings.Join(strings.Fields(name), " ")
 
 		items.Item = append(items.Item, Item{
-			Ext: m.File.Ext,
+			Ext:  m.File.Ext,
 			Src:  src,
 			Name: name,
 			Size: size,
@@ -805,7 +805,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 				}
 			}
 			size := m.File.Size
-			if size < filter {
+			if IsVideoFile(m.File.Ext) && size < filter {
 				continue
 			}
 
@@ -821,7 +821,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 			name = strings.Join(strings.Fields(name), " ")
 
 			items.Item = append(items.Item, Item{
-				Ext: m.File.Ext,
+				Ext:  m.File.Ext,
 				Src:  src,
 				Name: name,
 				Size: size,

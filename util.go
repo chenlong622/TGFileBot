@@ -14,6 +14,28 @@ import (
 	"time"
 )
 
+var (
+	imExt = map[string]bool{
+		".jpg": true, ".jpeg": true, ".png": true, ".gif": true, ".bmp": true,
+		".webp": true, ".heic": true, ".heif": true,
+	}
+	videoExt = map[string]bool{
+		".mp4": true, ".mkv": true, ".avi": true, ".wmv": true, ".flv": true,
+		".f4v": true, ".webm": true, ".m4v": true, ".mov": true, ".3gp": true,
+		".ts": true, ".m3u8": true, ".rm": true, ".rmvb": true, ".iso": true,
+	}
+)
+
+// IsVideoFile 判断文件后缀是否为视频文件
+func IsVideoFile(ext string) bool {
+	return videoExt[strings.ToLower(ext)]
+}
+
+// IsImFile 判断文件后缀是否为图片文件
+func IsImFile(ext string) bool {
+	return imExt[strings.ToLower(ext)]
+}
+
 // handleTime 将秒数格式化为人类可读的时间字符串
 func handleTime(secs uint64) string {
 	if secs > 86400 {
