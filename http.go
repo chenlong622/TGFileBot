@@ -632,17 +632,18 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keywords := params.Keywords
-	if keywords == "" {
+	src := params.Keywords
+	if src == "" {
 		http.Error(w, "缺少关键词", http.StatusBadRequest)
 		return
 	}
+	words := strings.Split(src, ",")
 	page := params.Page
 	offset := params.Offset
 	limit := params.Limit
 
 	clientIP := GetClientIP(r)
-	log.Printf("正在处理来自 %s 的请求, 开始搜索, page=%d, offset=%d, limit=%d, keywords=%s", clientIP, page, offset, limit, keywords)
+	log.Printf("正在处理来自 %s 的请求, 开始搜索, page=%d, offset=%d, limit=%d, keywords=%s", clientIP, page, offset, limit, src)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
@@ -664,7 +665,8 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 		maxCount = 3
 	}
 
-	for _, channel := range channels {
+	maxLen := len(words)
+	for num, channel := range channels {
 		infos.Cond.L.Lock()
 		for searchCount.Load() >= maxCount {
 			infos.Cond.Wait()
@@ -684,6 +686,15 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 				infos.Cond.L.Unlock()
 			}()
 
+			keywords := words[0]
+			if num < maxLen {
+				keywords = words[num]
+			}
+			
+			keywords = strings.TrimSpace(keywords)
+			if keywords == "" || keywords == "#" {
+				return
+			}
 			result, err := infos.search(channel, keywords, page, limit, int32(offset), params.Filter, params.Reverse, r.Context())
 			if err != nil {
 				return
