@@ -657,7 +657,7 @@ func (infos *Infos) list(channel string, page, limit int, filter int64, reverse 
 		Filter:  &telegram.InputMessagesFilterPhotoVideo{},
 	}
 
-	_, ms, err := infos.handleMs(channelInfo.CID, offset, "user", param)
+	_, ms, err := infos.handleMs(channelInfo.CID, offset, "user", "", param)
 	if err != nil {
 		return items, err
 	}
@@ -768,7 +768,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 		Filter:  &telegram.InputMessagesFilterPhotoVideo{},
 	}
 
-	_, ms, err := infos.handleMs(channelInfo.CID, offset, "user", param)
+	_, ms, err := infos.handleMs(channelInfo.CID, offset, "user", keywords, param)
 	if err != nil {
 		return items, err
 	}
@@ -807,7 +807,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 }
 
 // selectClient 根据当前网络延迟选择最佳客户端
-func (infos *Infos) handleMs(cid int64, mid int32, cate string, params *telegram.SearchOption) (result string, ms []telegram.NewMessage, err error) {
+func (infos *Infos) handleMs(cid int64, mid int32, cate, words string, params *telegram.SearchOption) (result string, ms []telegram.NewMessage, err error) {
 	var wakeTime time.Time
 
 	// 1. 选择下载客户端，并提取对应的唤醒时间

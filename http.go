@@ -223,7 +223,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		Context: r.Context(),
 		IDs:     []int32{params.MID},
 	}
-	cate, ms, err := infos.handleMs(params.CID, params.MID, params.Cate, param)
+	cate, ms, err := infos.handleMs(params.CID, params.MID, params.Cate, "", param)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -425,7 +425,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		Context: r.Context(),
 		IDs:     []int32{params.MID},
 	}
-	cate, ms, err := infos.handleMs(params.CID, params.MID, params.Cate, param)
+	cate, ms, err := infos.handleMs(params.CID, params.MID, params.Cate, "", param)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -598,12 +598,20 @@ func handleSources(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
+	if params.MID == 0 {
+		http.Error(w, "消息ID无效", http.StatusBadRequest)
+		return
+	}
+	if params.CID == 0 {
+		http.Error(w, "频道ID无效", http.StatusBadRequest)
+		return
+	}
 
 	param := &telegram.SearchOption{
 		Context: r.Context(),
 		IDs:     []int32{params.MID},
 	}
-	_, resources, err := infos.handleMs(params.CID, params.MID, params.Cate, param)
+	_, resources, err := infos.handleMs(params.CID, params.MID, params.Cate, "", param)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -816,9 +824,13 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "频道ID无效", http.StatusBadRequest)
 		return
 	}
+	if params.MID == 0 {
+		http.Error(w, "消息ID无效", http.StatusBadRequest)
+		return
+	}
 
 	param := &telegram.SearchOption{IDs: []int32{params.MID}}
-	_, ms, err := infos.handleMs(params.CID, params.MID, "user", param)
+	_, ms, err := infos.handleMs(params.CID, params.MID, "user", "", param)
 	if err != nil || len(ms) == 0 {
 		if len(ms) == 0 {
 			err = errors.New("未获取到消息")
@@ -940,7 +952,7 @@ func hackLinks(res HackLink) (links []string) {
 
 		// 3. 使用 UserBot 客户端尝试获取目标消息
 		param := &telegram.SearchOption{IDs: []int32{mid}}
-		_, ms, err := infos.handleMs(cid, mid, "user", param)
+		_, ms, err := infos.handleMs(cid, mid, "user", "", param)
 		if err != nil || len(ms) == 0 {
 			log.Printf("获取消息失败: cid=%v, mid=%d, err=%v, count=%d", cid, mid, err, len(ms))
 			if len(ms) == 0 {
