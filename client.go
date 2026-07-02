@@ -841,7 +841,7 @@ func (infos *Infos) handleMs(cid int64, mid int32, cate, words string, params *t
 	}
 
 	// 3. 获取消息
-	key := fmt.Sprintf("%d:%d", cid, mid)
+	key := fmt.Sprintf("%d:%d:%s:%s", cid, mid, cate, words)
 	infos.Mutex.RLock()
 	value, ok := infos.MsCache[key]
 	infos.Mutex.RUnlock()
