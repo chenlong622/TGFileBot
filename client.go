@@ -844,23 +844,26 @@ func (infos *Infos) handleMs(params HandleMs) (result string, ms []telegram.NewM
 	if params.Limit == 0 {
 		params.Limit = 100
 	}
+
 	kname := params.Cate
+
 	if params.Words != "" {
 		kname += ":" + params.Words
 	}
 
 	kname += ":" + strconv.FormatInt(params.CID, 10)
+
 	for _, mid := range params.MIDs {
 		kname += ":" + strconv.FormatInt(int64(mid), 10)
+	}
+
+	if params.OffsetID > 0 {
+		kname += ":" + strconv.FormatInt(int64(params.OffsetID-1), 10)
 	}
 
 	lenMIDs := len(params.MIDs)
 	if lenMIDs > 0 && params.Limit > lenMIDs {
 		params.Limit = lenMIDs
-	}
-
-	if params.OffsetID > 0 {
-		kname += ":" + strconv.FormatInt(int64(params.OffsetID-1), 10)
 	}
 
 	infos.Mutex.RLock()

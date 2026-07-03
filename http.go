@@ -161,7 +161,6 @@ func handleParams(r *http.Request) (result Params, err error) {
 	}
 	result.Reverse = reverse
 
-	
 	return result, nil
 }
 
@@ -533,6 +532,12 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		// 启动并发下载协程
 		go stream.start(start, end)
 		defer func() {
+			kname := cate + ":" + strconv.FormatInt(params.CID, 10) + ":" + strconv.FormatInt(int64(params.MID), 10)
+			infos.Mutex.Lock()
+			evictOldestMsCache(infos.MsCache, infos.MaxMs)
+			infos.MsCache[kname] = &MsCache{Mes: stream.Ms, Time: time.Now()}
+			infos.Mutex.Unlock()
+			
 			// 异步清理：不阻塞当前请求 goroutine 返回，使新请求能立即被处理
 			go stream.clean()
 			switch cate {
@@ -761,7 +766,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 				infos.Cond.Broadcast()
 				infos.Cond.L.Unlock()
 			}()
-			
+
 			filter := int64(0)
 			if num < lenFilters {
 				filter = params.Filters[num]

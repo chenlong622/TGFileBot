@@ -27,8 +27,6 @@ type Task struct {
 // Stream 结构体用于管理大文件的并发下载和流式传输
 type Stream struct {
 	Ctx          context.Context        // 上下文, 用于取消下载
-	Client       *telegram.Client       // Gogram 客户端实例
-	Src          *telegram.MessageMedia // Telegram 消息媒体源
 	Workers      int                    // 下载并发协程数
 	MID          int32                  // Telegram 消息 ID
 	CID          int64                  // Telegram 频道/会话 ID
@@ -46,6 +44,9 @@ type Stream struct {
 	Init         atomic.Bool            // 是否已经初始化
 	Mutex        *sync.Mutex            // 用于保护并发安全
 	Tasks        chan *Task             // 任务管道, 用于向工作协程分发下载任务
+	Client       *telegram.Client       // Gogram 客户端实例
+	Src          *telegram.MessageMedia // Telegram 消息媒体源
+	Ms           []telegram.NewMessage  // Telegram 消息
 	Pools        []*telegram.WorkerPool // 每个工作协程的独立连接池 (Pools[numTask-1])
 }
 
@@ -121,6 +122,15 @@ func (stream *Stream) start(contentStart, contentEnd int64) {
 // download 是工作协程的核心逻辑, 负责循环领取并下载文件分片
 func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 	cacheKey := mediaCacheKey(stream.CID, stream.MID)
+	defer func() {
+		if len(stream.Pools) > numTask-1 {
+			if pool := stream.Pools[numTask-1]; pool != nil {
+				pool.Close()
+				stream.Pools[numTask-1] = nil
+			}
+		}
+	}()
+
 	for {
 		maxWait := 3
 		chunkSize := stream.ChunkSize
@@ -373,23 +383,6 @@ func (stream *Stream) clean() {
 	waiter := time.NewTimer(5 * time.Second)
 	defer func() {
 		waiter.Stop()
-		// 等待所有 download 协程退出后再操作 Pools，消除与 handlePool 写入的数据竞争
-		// Count 由各协程自己递减（defer stream.Count.Add(-1)），此处轮询直到归零
-		deadline := time.Now().Add(30 * time.Second)
-		for stream.Count.Load() > 0 {
-			if time.Now().After(deadline) {
-				log.Printf("等待协程超时, 强制退出")
-				break
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		// 关闭所有工作协程的连接池（仅 drain channel，不终止底层 TCP）
-		for num, pool := range stream.Pools {
-			if pool != nil {
-				pool.Close()
-				stream.Pools[num] = nil
-			}
-		}
 		if infos.Conf.DeBUG {
 			log.Print("清理完成")
 		}
@@ -440,7 +433,10 @@ func (stream *Stream) refresh(numTask int, version int64) (err error) {
 	}
 
 	// 重新获取消息
-	ms, err := stream.Client.GetMessages(stream.CID, &telegram.SearchOption{IDs: []int32{stream.MID}})
+	ms, err := stream.Client.GetMessages(stream.CID, &telegram.SearchOption{
+		IDs:     []int32{stream.MID},
+		Context: stream.Ctx,
+	})
 	if err != nil {
 		stream.Error = err
 		return err
@@ -459,6 +455,7 @@ func (stream *Stream) refresh(numTask int, version int64) (err error) {
 		return err
 	}
 	// 更新流中的媒体引用
+	stream.Ms = ms
 	*stream.Src = src.Media()
 	stream.Version.Add(1)
 	if infos.Conf.DeBUG {
