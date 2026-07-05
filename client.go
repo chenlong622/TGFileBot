@@ -809,7 +809,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 	return items, nil
 }
 
-// selectClient 根据当前网络延迟选择最佳客户端
+// handleMs 根据当前网络延迟选择最佳客户端
 func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	var wakeTime time.Time
 
@@ -905,6 +905,50 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	}
 
 	return result, nil
+}
+
+func (infos *Infos) refreshMs(version int64, params HandleMs, msCache *MsCache) (src telegram.NewMessage, err error) {
+	infos.Mutex.Lock()
+	defer infos.Mutex.Unlock()
+
+	if version != msCache.Version.Load() {
+		if len(msCache.Mes) > 0 {
+			src = msCache.Mes[0]
+			if infos.Conf.DeBUG {
+				log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mids=%v, name=%s, version=%d, newVersion=%d", params.CID, params.MIDs, src.File.Name, version, msCache.Version.Load())
+			}
+			return src, nil
+		} else {
+			if infos.Conf.DeBUG {
+				log.Printf("文件引用已刷新, 但未获取到消息, cid=%d, mids=%v, version=%d, newVersion=%d", params.CID, params.MIDs, version, msCache.Version.Load())
+			}
+			return src, errors.New("未获取到消息")
+		}
+	}
+	// 重新获取消息
+	ms, err := infos.Client.GetMessages(params.CID, &telegram.SearchOption{
+		IDs:     params.MIDs,
+		Context: params.Ctx,
+	})
+	if err != nil {
+		log.Printf("刷新文件引用失败: %+v", err)
+		return src, err
+	}
+	if len(ms) == 0 {
+		err = errors.New("未获取到消息")
+		log.Printf("未获取到消息: cid=%v, mids=%v", params.CID, params.MIDs)
+		return src, err
+	}
+	src = ms[0]
+	if !src.IsMedia() {
+		err = errors.New("消息不包含媒体")
+		log.Printf("消息不包含媒体: cid=%v, mids=%v", params.CID, params.MIDs)
+		return src, err
+	}
+	msCache.Mes = ms
+	msCache.Time = time.Now()
+	msCache.Version.Add(1)
+	return src, nil
 }
 
 // handleChannel 处理频道ID, 返回 InputPeer
@@ -1081,7 +1125,7 @@ func handleItem(m telegram.NewMessage) (item Item) {
 		last = char
 	}
 	src = srcBuilder.String()
-	
+
 	name := strings.TrimSpace(m.File.Name)
 	name = strings.ReplaceAll(name, "_", "")
 	name = strings.Join(strings.Fields(name), " ")

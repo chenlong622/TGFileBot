@@ -327,43 +327,18 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 				if infos.Conf.DeBUG {
 					log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
 				}
-				func() {
-					infos.Mutex.Lock()
-					defer infos.Mutex.Unlock()
-
-					if version != msCache.Version.Load() {
-						if infos.Conf.DeBUG {
-							log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mid=%d, name=%s, version=%d, newVersion=%d", params.CID, params.MID, src.File.Name, version, msCache.Version.Load())
-						}
-						return
-					}
-					// 重新获取消息
-					ms, err := infos.Client.GetMessages(params.CID, &telegram.SearchOption{
-						IDs:     []int32{params.MID},
-						Context: r.Context(),
-					})
-					if err != nil {
-						log.Printf("刷新文件引用失败: %+v", err)
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-						return
-					}
-					if len(ms) == 0 {
-						http.Error(w, "未获取到消息", http.StatusBadRequest)
-						return
-					}
-					src = ms[0]
-					if !src.IsMedia() {
-						http.Error(w, "消息不包含媒体", http.StatusBadRequest)
-						return
-					}
-					msCache.Mes = ms
-					msCache.Time = time.Now()
-					msCache.Version.Add(1)
-				}()
+				src, err = infos.refreshMs(version, param, msCache)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				buf.Reset()
 			} else {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+		} else {
+			break
 		}
 	}
 
@@ -515,13 +490,31 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		clientIP := GetClientIP(r)
 		log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, fileName)
 		buf := new(bytes.Buffer)
-		_, err = infos.Client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
-			Buffer: buf,
-			Ctx:    r.Context(),
-		})
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		maxCount := 2
+		for count := 1; count <= maxCount; count++ {
+			version := msCache.Version.Load()
+			_, err = infos.Client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
+				Buffer: buf,
+				Ctx:    r.Context(),
+			})
+			if err != nil {
+				if telegram.MatchError(err, "FILE_REFERENCE_EXPIRED") {
+					if infos.Conf.DeBUG {
+						log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
+					}
+					src, err = infos.refreshMs(version, param, msCache)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+					buf.Reset()
+				} else {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+			} else {
+				break
+			}
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(buf.Len()))
 		w.Write(buf.Bytes())

@@ -425,6 +425,7 @@ docker run -d --name tgfilebot -p 8080:8080 -v $(pwd)/files:/root/files tgfilebo
 2. **消费者 (HTTP Handler)**: 按照 Range 请求的字节序，精准地将数据块写入 HTTP 响应体。
 3. **引用透明**: 针对 Telegram 内部的 `file_reference` 过期问题，程序实现了自动静默刷新机制，确保即便在数小时的流传输过程中，连接也不会因为
    Token 失效而中断。
+4. **消息缓存优化**: 封装了统一的消息获取机制，并引入本地 LRU 缓存逻辑，有效减少对 Telegram API 的频繁调用，大幅提升高并发下的响应速度与系统稳定性。
 
 ## 注意事项
 
