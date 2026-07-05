@@ -607,7 +607,7 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 			SystemVersion: "Android 14",
 			AppVersion:    "10.14.3",
 		},
-		FloodHandler: func(err error) bool {
+		FloodHandler: func(ctx context.Context, err error) bool {
 			wait := 3
 			matches := infos.Rex.FindStringSubmatch(err.Error())
 			if len(matches) > 1 {
@@ -619,9 +619,17 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 				}
 			}
 			log.Printf("访问太过频繁, 等待 %d 秒后重试", wait+1)
-			waitUntil := time.Now().Add(time.Duration(wait+1) * time.Second)
+			waitSec := time.Duration(wait+1) * time.Second
+			waitUntil := time.Now().Add(waitSec)
 			infos.WaitUntil.Store(waitUntil.Unix())
-			time.Sleep(time.Duration(wait+1) * time.Second)
+			
+			timer := time.NewTimer(waitSec)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+			case <-timer.C:
+			}
+			
 			return true
 		},
 	}

@@ -193,7 +193,17 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					if infos.Conf.DeBUG {
 						log.Printf("协程%d: 检测到FloodWait, 等待 %.2f 秒", numTask, remaining.Seconds())
 					}
-					time.Sleep(remaining)
+					timer := time.NewTimer(remaining)
+					select {
+					case <-stream.Ctx.Done():
+						timer.Stop() // 取消时显式停止并释放定时器资源
+						task.Error = errors.New("已取消下载任务")
+						close(task.Content)
+						return
+					case <-timer.C:
+						// 等待时间结束，定时器自然释放
+					}
+
 				}
 			}
 			version := stream.Version.Load()
@@ -237,8 +247,16 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					}
 					backoff := time.Duration(backoffMs) * time.Millisecond
 					log.Printf("协程%d: TCP连接超时 %d/%d, 错误: %v, 等待 %.2f 秒后重试", numTask, num, maxCount, err, backoff.Seconds())
-
-					time.Sleep(backoff)
+					timer := time.NewTimer(backoff)
+					select {
+					case <-stream.Ctx.Done():
+						timer.Stop() // 取消时显式停止并释放定时器资源
+						task.Error = errors.New("已取消下载任务")
+						close(task.Content)
+						return
+					case <-timer.C:
+						// 等待时间结束，定时器自然释放
+					}
 					if maxWait > 0 {
 						maxWait--
 						num-- // 抵消 for 循环的 num++, 不计入重试次数
@@ -264,7 +282,16 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 						if currentWait := infos.WaitUntil.Load(); waitUntil.Unix() > currentWait {
 							infos.WaitUntil.Store(waitUntil.Unix())
 						}
-						time.Sleep(time.Duration(wait+1) * time.Second)
+						timer := time.NewTimer(time.Duration(wait+1) * time.Second)
+						select {
+						case <-stream.Ctx.Done():
+							timer.Stop() // 取消时显式停止并释放定时器资源
+							task.Error = errors.New("已取消下载任务")
+							close(task.Content)
+							return
+						case <-timer.C:
+							// 等待时间结束，定时器自然释放
+						}
 						if maxWait > 0 {
 							num = maxCount - 1
 							num-- // 抵消 for 循环的 num++, 不计入重试次数
@@ -278,7 +305,16 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 							}
 							backoff := time.Duration(backoffMs) * time.Millisecond
 							log.Printf("协程%d: 网络错误重试 %d/%d, 等待 %.2f 秒后重试. 错误: %+v", numTask, num, maxCount, backoff.Seconds(), err)
-							time.Sleep(backoff)
+							timer := time.NewTimer(backoff)
+							select {
+							case <-stream.Ctx.Done():
+								timer.Stop() // 取消时显式停止并释放定时器资源
+								task.Error = errors.New("已取消下载任务")
+								close(task.Content)
+								return
+							case <-timer.C:
+								// 等待时间结束，定时器自然释放
+							}
 							continue
 						} else {
 							task.Error = err
