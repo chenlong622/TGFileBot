@@ -42,6 +42,7 @@ type Stream struct {
 	Count        atomic.Int64           // 当前正在运行的协程数量
 	Version      atomic.Int64           // 文件版本号, 因引用过期刷新后递增
 	Init         atomic.Bool            // 是否已经初始化
+	TCPDead      atomic.Bool            // TCP 是否断开
 	Mutex        *sync.Mutex            // 用于保护并发安全
 	Tasks        chan *Task             // 任务管道, 用于向工作协程分发下载任务
 	Client       *telegram.Client       // Gogram 客户端实例
@@ -224,6 +225,11 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 				// 如果 context 已经关闭（手动取消或整体超时），则彻底停止任务
 				case stream.Ctx.Err() != nil, errors.Is(err, context.Canceled):
 					task.Error = errors.New("已取消下载任务")
+					close(task.Content)
+					return
+				case errors.Is(err, telegram.ErrWorkerTCPDead):
+					stream.TCPDead.Store(true)
+					task.Error = err
 					close(task.Content)
 					return
 				case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):

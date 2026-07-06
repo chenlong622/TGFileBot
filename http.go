@@ -587,11 +587,22 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 			// 异步清理：不阻塞当前请求 goroutine 返回，使新请求能立即被处理
 			go stream.clean()
-			switch cate {
-			case "user":
-				infos.TCPStatus.User.WakeTime = time.Now()
-			case "bot":
-				infos.TCPStatus.Bot.WakeTime = time.Now()
+
+			// 如果 TCP 实际断开，将 WakeTime 清零，下次请求必然触发 wakeTCP 探活重连
+			if !stream.TCPDead.Load() {
+				switch cate {
+				case "user":
+					infos.TCPStatus.User.WakeTime = time.Time{}
+				case "bot":
+					infos.TCPStatus.Bot.WakeTime = time.Time{}
+				}
+			} else {
+				switch cate {
+				case "user":
+					infos.TCPStatus.User.WakeTime = time.Now()
+				case "bot":
+					infos.TCPStatus.Bot.WakeTime = time.Now()
+				}
 			}
 		}()
 
