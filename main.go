@@ -199,7 +199,7 @@ type Infos struct {
 	Code         chan string                     // 用于接收异步提交的验证码
 	Pass         chan string                     // 用于接收异步提交的二步验证密码
 	IDs          map[int64]ID                    // 用户 ID -> 权限标记
-	HashIndex    map[string]int64                // hash -> uid 反查表, 由 rebuildHashIndex 统一维护, 供 checkHash O(1) 查找
+	HashIndex    map[string]int64                // hash -> uid 反查表, 由 rebuildHashIndexLocked 统一维护, 供 checkHash O(1) 查找
 	LatestGroups map[string]*LatestGroup         // 频道 -> 最近一次相册边界去重信息, 见 LatestGroup 注释
 	ChannelID    map[string]*ChannelInfo         // 缓存频道名到频道 ID 的映射, 减少重复查询
 	HeadCache    map[string]*MediaCache          // 缓存文件头部数据
@@ -229,7 +229,7 @@ var version = "v1.1.3"
 func main() {
 	startTime = time.Now()
 	// 解析命令行参数
-	files := flag.String("files", "files", "配置文件所属目录路径（包含 config.json, session 等）")
+	files := flag.String("files", "", "配置文件所属目录路径（包含 config.json, session 等）")
 	file := flag.String("log", "", "日志文件的存放路径")
 	var ver bool
 	flag.BoolVar(&ver, "version", false, "显示程序版本号并退出")
@@ -354,6 +354,7 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 	if filePath != "" {
 		filePath = filepath.Clean(filePath)
 	}
+	filesPath = filepath.Clean(filesPath)
 
 	maxChannel := 16
 	maxMedia := 4
