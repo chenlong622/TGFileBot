@@ -504,6 +504,10 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	src := ms[0]
+	if src.File == nil {
+		http.Error(w, "消息不是有效的媒体文件", http.StatusBadRequest)
+		return
+	}
 	size := src.File.Size
 	fileName := src.File.Name
 	chunkSize := 1 * 1024 * 1024
@@ -651,8 +655,15 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		go stream.start(start, end)
 		defer func() {
 			if stream.Version.Load() > 0 {
+				// stream.Ms 由 stream.refresh() 在 stream.Mutex 保护下并发写入
+				// （下载协程可能在客户端已断开、本函数已经在准备 return 时仍在后台刷新引用），
+				// 这里必须持同一把锁读取，否则可能读到撕裂的 slice header 并写入共享缓存 msCache.Mes
+				stream.Mutex.Lock()
+				ms := stream.Ms
+				stream.Mutex.Unlock()
+
 				infos.Mutex.Lock()
-				msCache.Mes = stream.Ms
+				msCache.Mes = ms
 				msCache.Time = time.Now()
 				msCache.Version.Add(1)
 				infos.Mutex.Unlock()
