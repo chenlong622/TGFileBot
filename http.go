@@ -1002,7 +1002,7 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "未获取到消息", http.StatusNotFound)
 		return
 	}
-	hasMore, err := infos.handleComments(params.MID, params.Offset, params.Limit, &ms)
+	hasMore, err := infos.handleComments(params.MID, params.Offset, params.Page, params.Limit, &ms)
 	if err != nil {
 		http.Error(w, "获取评论失败", http.StatusInternalServerError)
 		return
@@ -1148,7 +1148,7 @@ func hackLinks(res HackLink) (items []Item, errs error) {
 
 		// 4. 处理链接中的评论 (comment) 逻辑
 		if match[5] != "" {
-			if _, err := infos.handleComments(mid, res.Offset, 0, &ms); err != nil {
+			if _, err := infos.handleComments(mid, res.Offset, 1, 0, &ms); err != nil {
 				log.Printf("获取评论失败: cid=%v, mid=%d, err=%+v", cid, mid, err)
 				errs = errors.Join(errs, err)
 				continue

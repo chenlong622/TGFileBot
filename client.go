@@ -1085,14 +1085,25 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 
 // handleComments 处理评论消息，返回评论消息列表
 // limit 为本次希望拉取的评论条数（对应 HTTP 请求的分页大小), hasMore 表示 Telegram 一侧是否还有更多评论未拉取,
-// 由"实际拉取到的原始评论条数是否达到 limit"判断——不能用追加到 ms 后的条数判断, 因为其中非媒体消息会被过滤掉
-func (infos *Infos) handleComments(mid, offset int32, limit int, ms *[]telegram.NewMessage) (hasMore bool, err error) {
+// 由"实际拉取到的原始评论条数是否达到 limit"判断——不能用追加到 ms 后的条数判断, 因为其中非媒体消息会被过滤掉。
+// page 的续传方式对齐 search()：offset==0 时按 "comments|mid|page" 查缓存拿到真实游标，
+// 不在缓存里且 page>1 说明跳页请求，直接报错（不能像 page=1 那样从头拉取）
+func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]telegram.NewMessage) (hasMore bool, err error) {
 	if len(*ms) == 0 {
 		return false, errors.New("未找到消息")
 	}
 	if limit <= 0 {
 		limit = 100
 	}
+
+	if offset == 0 {
+		key := fmt.Sprintf("comments|%d|%d", mid, page)
+		offset = handleOffset("get", key, offset)
+		if page > 1 && offset == 0 {
+			return false, errors.New("未找到匹配消息")
+		}
+	}
+
 	src := (*ms)[0]
 	if src.Message.Replies != nil && src.Message.Replies.ChannelID != 0 {
 		discussionID := src.Message.Replies.ChannelID
@@ -1142,12 +1153,20 @@ func (infos *Infos) handleComments(mid, offset int32, limit int, ms *[]telegram.
 
 		// PackMessages 将 []telegram.Message 转为 []*telegram.NewMessage，
 		// 然后按 commentIDSet 过滤，设置 Chat.ID 后追加到 ms
+		startLen := len(*ms)
 		for _, nm := range telegram.PackMessages(infos.UserClient.Load(), newMs) {
 			if !nm.IsMedia() {
 				continue
 			}
 			nm.Chat.ID = discussionID
 			*ms = append(*ms, *nm)
+		}
+
+		// 记录下一页的续传游标, 供下次 page+1 请求时通过 handleOffset("get", ...) 取回，
+		// 跟 search() 里 "page -> offset" 的续传方式保持一致
+		if hasMore && len(*ms) > startLen {
+			key := fmt.Sprintf("comments|%d|%d", mid, page+1)
+			handleOffset("set", key, (*ms)[len(*ms)-1].ID)
 		}
 	}
 	return hasMore, nil
