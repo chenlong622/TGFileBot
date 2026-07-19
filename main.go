@@ -229,7 +229,7 @@ var version = "v1.1.3"
 func main() {
 	startTime = time.Now()
 	// 解析命令行参数
-	files := flag.String("files", "", "配置文件所属目录路径（包含 config.json, session 等）")
+	files := flag.String("files", "files", "配置文件所属目录路径（包含 config.json, session 等）")
 	file := flag.String("log", "", "日志文件的存放路径")
 	var ver bool
 	flag.BoolVar(&ver, "version", false, "显示程序版本号并退出")

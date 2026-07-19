@@ -382,7 +382,9 @@ func (infos *Infos) checkStatus() (err error) {
 		if me.Username != "" {
 			name = "@" + me.Username
 		}
-		sendMS(nil, fmt.Sprintf("登录成功! 用户: %s", name), nil)
+		src := fmt.Sprintf("登录成功! 用户: %s", name)
+		log.Print(src)
+		sendMS(nil, src, nil)
 		infos.Mutex.Lock()
 		infos.Status.Store(3)
 		infos.Mutex.Unlock()
@@ -1174,10 +1176,14 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 				continue
 			}
 			if nm.Channel == nil || nm.Channel.ID != discussionID {
-				if discussionChannel != nil {
+				switch {
+				case discussionChannel != nil:
 					nm.Channel = discussionChannel
-				} else if nm.Channel != nil {
+				case nm.Channel != nil:
 					nm.Channel.ID = discussionID
+					nm.Channel.Title = src.Channel.Title
+					nm.Channel.Username = src.Channel.Username
+					nm.Channel.AccessHash = src.Channel.AccessHash
 				}
 			}
 			*ms = append(*ms, *nm)
