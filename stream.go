@@ -64,23 +64,17 @@ func newStream(ctx context.Context, client *telegram.Client, media telegram.Mess
 	// 根据并发数动态调整分片大小
 	chunkSize := int64(1 * 1024 * 1024)
 	// 默认 32MB 缓存
-	maxCacheSize := infos.Conf.MaxSize
+	maxCacheSize := infos.Conf.Load().MaxSize
 	if maxCacheSize == 0 {
 		maxCacheSize = 32 * 1024 * 1024
-	}
-	headSize := maxCacheSize / 2
-	if headSize > 8*1024*1024 {
-		headSize = 8 * 1024 * 1024
-	}
-	tailSize := maxCacheSize / 2
-	if tailSize > 8*1024*1024 {
-		tailSize = 8 * 1024 * 1024
 	}
 	// 计算任务管道的容量
 	maxChans := int(maxCacheSize / chunkSize)
 	if maxChans == 0 {
 		maxChans = 1
 	}
+	// 注意：HeadSize/TailSize 不在此处计算，而是由调用方在拿到文件大小后
+	// 调用 mediaCacheSizes(size, maxCacheSize) 统一算出并赋值，避免两处重复计算互相覆盖
 	return &Stream{
 		Ctx:          ctx,
 		Client:       client,
@@ -92,8 +86,6 @@ func newStream(ctx context.Context, client *telegram.Client, media telegram.Mess
 		ContentSize:  contentSize,
 		ChunkSize:    chunkSize, // 这里设置了固定值, 可以根据需要调整
 		MaxCacheSize: maxCacheSize,
-		HeadSize:     headSize,
-		TailSize:     tailSize,
 		Tasks:        make(chan *Task, maxChans),
 		Mutex:        new(sync.Mutex),
 		TaskStart:    new(int64),
@@ -160,7 +152,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 		}
 
 		// 将任务推入管道供下游消费（HTTP 响应层）
-		// 同时监听 ctx.Done，防止 clean() 置 nil Tasks 后协程永久阻塞
+		// 同时监听 ctx.Done，防止 clean() 停止消费后 Tasks 缓冲区写满导致协程永久阻塞
 		select {
 		case <-stream.Ctx.Done():
 			stream.Mutex.Unlock()
@@ -175,8 +167,9 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 		stream.Mutex.Unlock()
 
 		// 尝试下载该分片
+		// 越靠近文件开头或结尾, 给予更多重试次数（先乘后除, 避免整数除法截断导致条件恒真）
 		maxCount := 3
-		if task.ContentStart < int64(1048576) || (contentEnd-task.ContentEnd)/contentEnd*1000 < 2 {
+		if task.ContentStart < int64(1048576) || (contentEnd > 0 && (contentEnd-task.ContentEnd)*1000/contentEnd < 2) {
 			maxCount = 6
 		}
 
@@ -191,7 +184,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 			// 下载
 			if waitUntil := infos.WaitUntil.Load(); waitUntil > 0 {
 				if remaining := time.Until(time.Unix(waitUntil, 0)); remaining > 0 {
-					if infos.Conf.DeBUG {
+					if infos.Conf.Load().DeBUG {
 						log.Printf("协程%d: 检测到FloodWait, 等待 %.2f 秒", numTask, remaining.Seconds())
 					}
 					timer := time.NewTimer(remaining)
@@ -234,7 +227,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					return
 				case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
 					// 如果报错文件引用过期, 则调用 refresh 重新获取消息并更新引用
-					if infos.Conf.DeBUG {
+					if infos.Conf.Load().DeBUG {
 						log.Printf("文件引用已过期: cid=%d, mid=%d, version=%d, name=%s, numTask=%d", stream.CID, stream.MID, version, fileName, numTask)
 					}
 					if err := stream.refresh(numTask, version); err != nil {
@@ -281,7 +274,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 								}
 							}
 						}
-						if infos.Conf.DeBUG {
+						if infos.Conf.Load().DeBUG {
 							log.Printf("协程%d: 访问太过频繁, 等待 %d 秒后重试", numTask, wait+1)
 						}
 						waitUntil := time.Now().Add(time.Duration(wait+1) * time.Second)
@@ -299,6 +292,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 							// 等待时间结束，定时器自然释放
 						}
 						if maxWait > 0 {
+							maxWait--
 							num = maxCount - 1
 							num-- // 抵消 for 循环的 num++, 不计入重试次数
 						}
@@ -425,18 +419,14 @@ func (stream *Stream) clean() {
 	waiter := time.NewTimer(5 * time.Second)
 	defer func() {
 		waiter.Stop()
-		if infos.Conf.DeBUG {
+		if infos.Conf.Load().DeBUG {
 			log.Print("清理完成")
 		}
 	}()
 
 	for {
 		select {
-		case task, ok := <-stream.Tasks:
-			if !ok {
-				task = nil
-				return
-			}
+		case task := <-stream.Tasks:
 			if task != nil {
 				timer := time.NewTimer(5 * time.Second)
 				select {
@@ -446,7 +436,7 @@ func (stream *Stream) clean() {
 					}
 					timer.Stop()
 				case <-timer.C:
-					if infos.Conf.DeBUG {
+					if infos.Conf.Load().DeBUG {
 						log.Printf("清理任务时遇到阻塞过长, 强制丢弃: start=%d end=%d", task.ContentStart, task.ContentEnd)
 					}
 				}
@@ -454,7 +444,10 @@ func (stream *Stream) clean() {
 			// 重置计时器
 			waiter.Reset(5 * time.Second)
 		case <-waiter.C:
-			stream.Tasks = nil
+			// stream.Tasks 本身从不 close()，这里不再置 nil：
+			// 该 channel 会随 stream 一起被 GC 回收，且任何仍在 download() 里
+			// 尝试发送的协程本就依赖各自 select 中的 stream.Ctx.Done() 分支退出，
+			// 与是否置 nil 无关（置 nil 只是无锁写共享字段, 属于纯粹的数据竞争）
 			return
 		}
 	}
@@ -468,7 +461,7 @@ func (stream *Stream) refresh(numTask int, version int64) (err error) {
 
 	// 如果版本号已经变了, 说明其他协程已经完成了刷新
 	if version != stream.Version.Load() {
-		if infos.Conf.DeBUG {
+		if infos.Conf.Load().DeBUG {
 			log.Printf("文件引用已刷新, 直接使用新版本: cid=%d, mid=%d, numTask=%d, version=%d, newVersion=%d", stream.CID, stream.MID, numTask, version, stream.Version.Load())
 		}
 		return
@@ -500,7 +493,7 @@ func (stream *Stream) refresh(numTask int, version int64) (err error) {
 	stream.Ms = ms
 	*stream.Src = src.Media()
 	stream.Version.Add(1)
-	if infos.Conf.DeBUG {
+	if infos.Conf.Load().DeBUG {
 		log.Printf("文件引用已刷新: cid=%d, mid=%d, numTask=%d, version=%d, newVersion=%d", stream.CID, stream.MID, numTask, version, stream.Version.Load())
 	}
 	return nil
@@ -529,7 +522,7 @@ func (stream *Stream) handlePool(numTask int, src telegram.MessageMedia) *telegr
 		return nil
 	}
 	stream.Pools[idx] = pool
-	if infos.Conf.DeBUG {
+	if infos.Conf.Load().DeBUG {
 		log.Printf("协程%d 初始化连接池成功: DC%d, cid=%d, mid=%d", numTask, dc, stream.CID, stream.MID)
 	}
 	return stream.Pools[idx]
@@ -566,7 +559,7 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 		if values, ok := infos.HeadCache[cacheKey]; ok {
 			for _, value := range values.Contents {
 				if value.Start == task.ContentStart && value.End == task.ContentEnd {
-					if infos.Conf.DeBUG {
+					if infos.Conf.Load().DeBUG {
 						log.Printf("命中头部缓存: cid=%d, mid=%d, name=%s, start=%d, end=%d", stream.CID, stream.MID, stream.FileName, task.ContentStart, task.ContentEnd)
 					}
 					task.handleContent(value.Content, offset, contentEnd)
@@ -577,7 +570,7 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 			evictOldestMediaCache(infos.HeadCache, infos.MaxMedia)
 			contents := make([]MediaContent, 0, int(stream.HeadSize/stream.ChunkSize))
 			infos.HeadCache[cacheKey] = &MediaCache{Contents: contents, Time: time.Now()}
-			if infos.Conf.DeBUG {
+			if infos.Conf.Load().DeBUG {
 				log.Printf("头部缓存已初始化: cid=%d, mid=%d", stream.CID, stream.MID)
 			}
 			return false
@@ -586,7 +579,7 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 		if values, ok := infos.TailCache[cacheKey]; ok {
 			for _, value := range values.Contents {
 				if value.Start == task.ContentStart && value.End == task.ContentEnd {
-					if infos.Conf.DeBUG {
+					if infos.Conf.Load().DeBUG {
 						log.Printf("命中尾部缓存: cid=%d, mid=%d, name=%s, start=%d, end=%d", stream.CID, stream.MID, stream.FileName, task.ContentStart, task.ContentEnd)
 					}
 					task.handleContent(value.Content, offset, contentEnd)
@@ -597,7 +590,7 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 			evictOldestMediaCache(infos.TailCache, infos.MaxMedia)
 			contents := make([]MediaContent, 0, int(stream.TailSize/stream.ChunkSize))
 			infos.TailCache[cacheKey] = &MediaCache{Contents: contents, Time: time.Now()}
-			if infos.Conf.DeBUG {
+			if infos.Conf.Load().DeBUG {
 				log.Printf("尾部缓存已初始化: cid=%d, mid=%d", stream.CID, stream.MID)
 			}
 			return false

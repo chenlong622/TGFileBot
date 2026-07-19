@@ -122,7 +122,7 @@ Pull the image and run directly:
 docker run -d --name tgfilebot \
   --restart unless-stopped \
   -p 8080:8080 \
-  -v $(pwd)/files:/root/files \
+  -v $(pwd)/files:/app/files \
   lm317379829/tgfilebot
 ```
 
@@ -139,7 +139,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./files:/root/files
+      - ./files:/app/files
 ```
 
 ```bash

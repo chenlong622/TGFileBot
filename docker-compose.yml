@@ -11,7 +11,7 @@ services:
     ports:
       - "9981:8080"
     volumes:
-      - ./files:/root/files
+      - ./files:/app/files
     environment:
       - TZ=Asia/Shanghai
     logging:

@@ -46,6 +46,15 @@ type ChannelInfo struct {
 	Time     time.Time
 }
 
+// LatestGroup 记录某个频道最近一次跨页相册（媒体组）边界的去重信息，
+// 避免翻页时把上一页已经展示过的相册子项重复展示一遍。
+// 按频道分别保存（而非共用一份全局状态），因为不同频道的消息 ID 完全可能重合。
+type LatestGroup struct {
+	Count int            // 上一次为该边界相册实际展示的子项数量, 新一页只需检查前 Count 条消息即可
+	MIDs  map[int32]bool // 上一次已经展示过的相册子项消息 ID 集合（精确匹配, 不使用子串匹配）
+	Time  time.Time      // 最近一次更新时间, 供淘汰策略使用
+}
+
 // HackLink 结构体用于在处理提取链接时传递中间数据
 type HackLink struct {
 	M       *telegram.NewMessage // 原始消息对象
@@ -106,6 +115,16 @@ type MsCache struct {
 	Version atomic.Int64
 }
 
+// snapshot 在持有 infos.Mutex 读锁的情况下安全地取出当前消息列表。
+// msCache 一旦被写入 infos.MsCache 就可能被并发的多个请求共享；refreshMs
+// 以及流式下载完成后的缓存回写都会在持锁状态下重新赋值 Mes 字段，
+// 因此所有读取都必须走这里，而不是直接 msCache.Mes（否则可能读到撕裂的 slice header）。
+func (msCache *MsCache) snapshot() []telegram.NewMessage {
+	infos.Mutex.RLock()
+	defer infos.Mutex.RUnlock()
+	return msCache.Mes
+}
+
 type Item struct {
 	Ext      string `json:"ext"`
 	Src      string `json:"src"`
@@ -127,48 +146,77 @@ type Items struct {
 }
 
 type ID struct {
-	Hash    string
 	IsAdmin bool
 	IsWhite bool
 }
 
+// TCPStatu 记录一路 TCP 连接的探活状态, 字段用原子类型是因为会被多个并发 HTTP 请求 goroutine 同时读写
 type TCPStatu struct {
-	Latenc   int64
-	WakeTime time.Time
+	Latenc   atomic.Int64 // 延迟, 单位毫秒
+	WakeTime atomic.Int64 // 最近一次探活/唤醒时间, UnixNano; 零值表示"从未探活", 会强制触发下一次 wakeTCP
+}
+
+// wake 记录一次成功的探活/唤醒, 更新延迟和唤醒时间
+func (s *TCPStatu) wake(latenc int64) {
+	s.Latenc.Store(latenc)
+	s.WakeTime.Store(time.Now().UnixNano())
+}
+
+// reset 清空唤醒时间, 强制下一次请求重新触发 wakeTCP
+func (s *TCPStatu) reset() {
+	s.WakeTime.Store(0)
+}
+
+// touch 仅刷新唤醒时间, 不改变已记录的延迟
+func (s *TCPStatu) touch() {
+	s.WakeTime.Store(time.Now().UnixNano())
+}
+
+// since 返回距离上次探活/唤醒过去的时长
+func (s *TCPStatu) since() time.Duration {
+	return time.Since(time.Unix(0, s.WakeTime.Load()))
 }
 
 // Infos 结构体保存了程序运行时的全局状态和资源句柄
 type Infos struct {
-	BotClient   *telegram.Client        // 独立的 Bot 客户端（用于与用户交互）
-	UserClient  *telegram.Client        // 全局 UserBot 客户端实例（用于读取私有内容和流式传输）
-	Client      *telegram.Client        // 当前活跃客户端指针
-	Mutex       *sync.RWMutex           // 全局互斥锁, 保护并发安全
-	Cond        *sync.Cond              // 条件变量, 用于等待
-	Conf        *Conf                   // 指向全局配置
-	File        *os.File                // 日志文件句柄
-	Rex         *regexp.Regexp          // 用于解析 Telegram FloodWait 错误的正则
-	RexRules    []*regexp.Regexp        // 预编译的群管正则规则缓存
-	FilesPath   string                  // 配置文件存放目录
-	FilePath    string                  // 日志文件路径
-	LatestID    string                  // 最近一次获取的消息 ID
-	LatestCount int                     // 最近一次获取的消息数量
-	MaxMs       int                     // 最大消息数
-	MaxChannel  int                     // 最大频道数
-	MaxMedia    int                     // 最大媒体数
-	BotID       int64                   // Bot 自身的 ID
-	Status      atomic.Int32            // UserBot 登录状态: 0 未登录, 1 等待验证码, 2 等待二步验证, 3 已登录
-	WaitUntil   atomic.Int64            // 等待结束时间
-	Code        chan string             // 用于接收异步提交的验证码
-	Pass        chan string             // 用于接收异步提交的二步验证密码
-	IDs         map[int64]ID            // 缓存用户 ID 到哈希的映射, 减少重复计算
-	ChannelID   map[string]*ChannelInfo // 缓存频道名到频道 ID 的映射, 减少重复查询
-	HeadCache   map[string]*MediaCache  // 缓存文件头部数据
-	TailCache   map[string]*MediaCache  // 缓存文件尾部数据
-	MsCache     map[string]*MsCache     // 缓存消息，避免频繁调用 GetMessages
-	TCPStatus   struct {
+	BotClient    atomic.Pointer[telegram.Client] // 独立的 Bot 客户端（用于与用户交互）, 原子指针支持无锁并发读写
+	UserClient   atomic.Pointer[telegram.Client] // 全局 UserBot 客户端实例（用于读取私有内容和流式传输）, 原子指针支持无锁并发读写
+	Mutex        *sync.RWMutex                   // 全局互斥锁, 保护并发安全
+	Cond         *sync.Cond                      // 条件变量, 用于搜索并发限流等待（独立锁, 不与 Mutex 共用）
+	Conf         atomic.Pointer[Conf]            // 全局配置快照, 原子指针支持无锁并发读；更新走 updateConf（写时拷贝）
+	ConfMu       *sync.Mutex                     // 序列化配置更新, 避免并发管理员命令互相覆盖对方的修改
+	File         *os.File                        // 日志文件句柄
+	Rex          *regexp.Regexp                  // 用于解析 Telegram FloodWait 错误的正则
+	RexRules     []*regexp.Regexp                // 预编译的群管正则规则缓存
+	FilesPath    string                          // 配置文件存放目录
+	FilePath     string                          // 日志文件路径
+	MaxMs        int                             // 最大消息数
+	MaxChannel   int                             // 最大频道数
+	MaxMedia     int                             // 最大媒体数
+	BotID        int64                           // Bot 自身的 ID
+	Status       atomic.Int32                    // UserBot 登录状态: 0 未登录, 1 等待验证码, 2 等待二步验证, 3 已登录
+	WaitUntil    atomic.Int64                    // 等待结束时间
+	Code         chan string                     // 用于接收异步提交的验证码
+	Pass         chan string                     // 用于接收异步提交的二步验证密码
+	IDs          map[int64]ID                    // 用户 ID -> 权限标记
+	HashIndex    map[string]int64                // hash -> uid 反查表, 由 rebuildHashIndex 统一维护, 供 checkHash O(1) 查找
+	LatestGroups map[string]*LatestGroup         // 频道 -> 最近一次相册边界去重信息, 见 LatestGroup 注释
+	ChannelID    map[string]*ChannelInfo         // 缓存频道名到频道 ID 的映射, 减少重复查询
+	HeadCache    map[string]*MediaCache          // 缓存文件头部数据
+	TailCache    map[string]*MediaCache          // 缓存文件尾部数据
+	MsCache      map[string]*MsCache             // 缓存消息，避免频繁调用 GetMessages
+	TCPStatus    struct {
 		Bot  TCPStatu
 		User TCPStatu
 	} // 记录TCP连接状态
+}
+
+// tcpStat 按类别返回对应的 TCP 探活状态, 用于收敛调用方重复的 switch cate 判断
+func (infos *Infos) tcpStat(cate string) *TCPStatu {
+	if cate == "user" {
+		return &infos.TCPStatus.User
+	}
+	return &infos.TCPStatus.Bot
 }
 
 var infos *Infos
@@ -210,26 +258,31 @@ func main() {
 				log.Printf("关闭日志文件错误: %+v", err)
 			}
 		}
-		if infos.BotClient != nil {
-			if err := infos.BotClient.Disconnect(); err != nil {
+		if client := infos.BotClient.Load(); client != nil {
+			if err := client.Disconnect(); err != nil {
 				log.Printf("Bot 退出失败: %+v", err)
 			}
 		}
-		if infos.UserClient != nil {
-			if err := infos.UserClient.Disconnect(); err != nil {
+		if client := infos.UserClient.Load(); client != nil {
+			if err := client.Disconnect(); err != nil {
 				log.Printf("UserBot 退出失败: %+v", err)
 			}
 		}
 	}()
 
 	// 3. 校验关键配置参数
-	if infos.Conf.AppID == 0 || infos.Conf.AppHash == "" || infos.Conf.BotToken == "" {
+	conf := infos.Conf.Load()
+	if conf.AppID == 0 || conf.AppHash == "" || conf.BotToken == "" {
 		log.Panicf("配置文件缺少必要的参数: AppID、AppHash、BotToken")
 		return
 	}
 
-	if infos.Conf.Port == 0 {
-		infos.Conf.Port = 8080 // 默认端口 8080
+	if conf.Port == 0 {
+		// 仅填充内存中的默认值, 不落盘持久化（用户未显式设置时不应改写 config.json）
+		filled := *conf
+		filled.Port = 8080 // 默认端口 8080
+		conf = &filled
+		infos.Conf.Store(conf)
 	}
 
 	// 4. 启动 Bot 客户端
@@ -252,7 +305,7 @@ func main() {
 
 	// 创建 HTTP 服务器
 	server := &http.Server{
-		Addr:              fmt.Sprintf(":%d", infos.Conf.Port),
+		Addr:              fmt.Sprintf(":%d", conf.Port),
 		Handler:           http.HandlerFunc(handleMain),
 		ReadTimeout:       30 * time.Second,
 		ReadHeaderTimeout: 10 * time.Second,
@@ -262,7 +315,7 @@ func main() {
 
 	// 6. 在独立协程中启动 HTTP 服务
 	go func() {
-		log.Printf("HTTP 服务运行在 %d 端口", infos.Conf.Port)
+		log.Printf("HTTP 服务运行在 %d 端口", conf.Port)
 
 		if err := server.ListenAndServe(); err != nil {
 			log.Printf("HTTP 服务启动失败: %+v", err)
@@ -283,13 +336,13 @@ func main() {
 	status := <-statusChan
 	log.Printf("收到信号: %v, 正在退出...", status)
 
-	// 设置关闭的超时时间，例如 10 秒
+	// 设置关闭的超时时间，例如 60 秒
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		log.Printf("HTTP 服务关闭异常: %+v", err)
 	} else {
-		if infos.Conf.DeBUG {
+		if infos.Conf.Load().DeBUG {
 			log.Printf("HTTP 服务已优雅关闭")
 		}
 	}
@@ -298,6 +351,10 @@ func main() {
 
 // newInfos 初始化全局 Infos 对象, 加载日志和配置
 func newInfos(filePath, filesPath string) (*Infos, error) {
+	if filePath != "" {
+		filePath = filepath.Clean(filePath)
+	}
+
 	maxChannel := 16
 	maxMedia := 4
 	mutex := new(sync.RWMutex)
@@ -308,20 +365,23 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 		FilePath:   filePath,
 		FilesPath:  filesPath,
 		Mutex:      mutex,
-		Cond:       sync.NewCond(mutex),
-		Code:       make(chan string, 1),
-		Pass:       make(chan string, 1),
-		HeadCache:  make(map[string]*MediaCache, maxMedia),
-		TailCache:  make(map[string]*MediaCache, maxMedia),
-		MsCache:    make(map[string]*MsCache, maxChannel*16),
-		ChannelID:  make(map[string]*ChannelInfo, maxChannel),
-		IDs:        make(map[int64]ID),
-		Rex:        regexp.MustCompile(`(?i)(?:FLOOD(?:_PREMIUM)?_WAIT_(\d+)|WAIT(?:\s+OF)?\s*(\d+))`),
+		ConfMu:     new(sync.Mutex),
+		// Cond 使用独立的 Mutex, 避免搜索限流的 Wait/Broadcast 与 infos.Mutex 上其他无关操作互相阻塞
+		Cond:         sync.NewCond(new(sync.Mutex)),
+		Code:         make(chan string, 1),
+		Pass:         make(chan string, 1),
+		HeadCache:    make(map[string]*MediaCache, maxMedia),
+		TailCache:    make(map[string]*MediaCache, maxMedia),
+		MsCache:      make(map[string]*MsCache, maxChannel*16),
+		ChannelID:    make(map[string]*ChannelInfo, maxChannel),
+		LatestGroups: make(map[string]*LatestGroup, maxChannel),
+		IDs:          make(map[int64]ID),
+		HashIndex:    make(map[string]int64),
+		Rex:          regexp.MustCompile(`(?i)(?:FLOOD(?:_PREMIUM)?_WAIT_(\d+)|WAIT(?:\s+OF)?\s*(\d+))`),
 	}
 
 	// 创建日志文件
 	if filePath != "" {
-		filePath = filepath.Clean(filePath)
 		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
 			log.Printf("无法打开日志文件: %+v", err)
@@ -343,7 +403,7 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 	if conf.MaxSize == 0 {
 		conf.MaxSize = 32 * 1024 * 1024
 	}
-	infos.Conf = conf
+	infos.Conf.Store(conf)
 	infos.IDs = make(map[int64]ID, len(conf.AdminIDs)+len(conf.WhiteIDs)+1)
 	infos.buildIDs()
 	infos.buildRexRules()
@@ -374,10 +434,9 @@ func newOffSets() *OffSets {
 
 // buildRegex 预编译正则规则并缓存到 infos.RexRules
 func (infos *Infos) buildRexRules() {
-	infos.Mutex.Lock()
-	defer infos.Mutex.Unlock()
-	infos.RexRules = make([]*regexp.Regexp, 0, len(infos.Conf.Rules))
-	for _, rule := range infos.Conf.Rules {
+	conf := infos.Conf.Load()
+	rexRules := make([]*regexp.Regexp, 0, len(conf.Rules))
+	for _, rule := range conf.Rules {
 		if rule == "" {
 			continue
 		}
@@ -386,9 +445,14 @@ func (infos *Infos) buildRexRules() {
 			log.Printf("正则规则编译失败 [%s]: %+v", rule, err)
 			continue
 		}
-		infos.RexRules = append(infos.RexRules, r)
+		rexRules = append(rexRules, r)
 	}
-	if infos.Conf.DeBUG {
-		log.Printf("成功预编译 %d 条正则规则", len(infos.RexRules))
+
+	infos.Mutex.Lock()
+	infos.RexRules = rexRules
+	infos.Mutex.Unlock()
+
+	if conf.DeBUG {
+		log.Printf("成功预编译 %d 条正则规则", len(rexRules))
 	}
 }

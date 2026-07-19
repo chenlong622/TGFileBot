@@ -66,6 +66,31 @@ func loadConf(filesPath string) (*Conf, error) {
 	return &conf, nil // 返回解析后的配置对象
 }
 
+// cloneConf 深拷贝 Conf, 确保发布出去的新快照不会与旧快照共享可变的 slice 底层数组。
+// 这一点很重要：slices.DeleteFunc 及 append(s[:i], s[i+1:]...) 这类写法都是原地压缩，
+// 如果只做结构体的浅拷贝, 修改新快照的切片会连带污染仍被并发读者持有的旧快照。
+func cloneConf(c *Conf) *Conf {
+	nc := *c
+	nc.Channels = append([]string(nil), c.Channels...)
+	nc.AdminIDs = append([]int64(nil), c.AdminIDs...)
+	nc.WhiteIDs = append([]int64(nil), c.WhiteIDs...)
+	nc.Rules = append([]string(nil), c.Rules...)
+	return &nc
+}
+
+// updateConf 以写者互斥的方式克隆当前配置、应用 mutate 中的修改、原子发布新快照并持久化到磁盘。
+// mutate 可以放心地修改传入的副本（含对 slice 字段的增删), 不会影响其他 goroutine 正在并发
+// 读取的旧快照——infos.Conf.Load() 拿到的要么是完整的旧配置, 要么是完整的新配置, 不会读到中间状态。
+func (infos *Infos) updateConf(mutate func(c *Conf)) error {
+	infos.ConfMu.Lock()
+	defer infos.ConfMu.Unlock()
+
+	newConf := cloneConf(infos.Conf.Load())
+	mutate(newConf)
+	infos.Conf.Store(newConf)
+	return saveConf(newConf, infos.FilesPath)
+}
+
 // saveConf 将当前的配置信息序列化并保存到 config.json 文件中
 // 常用于在程序运行过程中动态更新配置（如通过 Bot 命令添加白名单）
 func saveConf(conf *Conf, filesPath string) error {

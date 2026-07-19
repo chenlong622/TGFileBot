@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +25,11 @@ var (
 		".f4v": true, ".webm": true, ".m4v": true, ".mov": true, ".3gp": true,
 		".ts": true, ".m3u8": true, ".rm": true, ".rmvb": true, ".iso": true,
 	}
+
+	// telegramLinkRe 匹配 t.me 消息链接, 供 handleLink 与 handleMess 复用, 避免每次请求重复编译
+	telegramLinkRe = regexp.MustCompile(`t\.me\/(c\/(\d+)|([a-zA-Z0-9_]+))\/(\d+)(?:.*(?:comment|thread)=(\d+))?`)
+	// sizeDigitSuffixRe 判断缓存大小字符串末尾是否为纯数字（即无单位后缀）
+	sizeDigitSuffixRe = regexp.MustCompile(`\d$`)
 )
 
 // IsVideoFile 判断文件后缀是否为视频文件
@@ -49,14 +54,14 @@ func handleTime(secs uint64) string {
 	return fmt.Sprintf("%ds", secs)
 }
 
-// formatFileSize 将字节数格式化为 B/K/M 单位的字符串
+// formatFileSize 将字节数格式化为 B/K/M/G 单位的字符串, 与 convertSize 支持的单位保持一致
 func formatFileSize(size int64) string {
 	const unit = 1024
 	if size < unit {
 		return fmt.Sprintf("%dB", size)
 	}
 
-	units := []string{"B", "K", "M"}
+	units := []string{"B", "K", "M", "G"}
 	var count int
 	var result = float64(size)
 
@@ -73,11 +78,12 @@ func formatFileSize(size int64) string {
 }
 
 // convertMaxSize 将用户输入的缓存大小字符串（如 "32M"）转换为字节数
-func convertSize(str string) int64 {
+// 无法识别单位或数值部分时返回 error, 调用方应将其视为格式错误而非静默使用默认值
+func convertSize(str string) (int64, error) {
 	var unit int64 = 1
 	src := strings.ToUpper(str)
 	switch {
-	case strings.HasSuffix(src, "B"), regexp.MustCompile(`\d$`).MatchString(src):
+	case strings.HasSuffix(src, "B"), sizeDigitSuffixRe.MatchString(src):
 		src = strings.TrimSuffix(src, "B")
 		unit = 1
 	case strings.HasSuffix(src, "K"):
@@ -90,14 +96,14 @@ func convertSize(str string) int64 {
 		src = strings.TrimSuffix(src, "G")
 		unit = 1024 * 1024 * 1024
 	default:
-		return int64(128 * 1024)
+		return 0, fmt.Errorf("无法识别的大小单位: %s", str)
 	}
 
 	value, err := strconv.ParseFloat(src, 64)
 	if err != nil {
-		return int64(128 * 1024)
+		return 0, err
 	}
-	return int64(value * float64(unit))
+	return int64(value * float64(unit)), nil
 }
 
 // extractContent 从字符串中提取正文与可选的行数参数
@@ -125,8 +131,15 @@ func extractContent(src string) (string, *int) {
 	return src, nil
 }
 
-// readLastLines 读取日志文件中匹配 src 正则的最后 count 行
+// readLastLines 从文件尾部开始向前分块读取, 找出匹配 src 正则的最后 count 行。
+// 只看最近日志是最常见的用法, 从尾部倒着读可以在命中足够行数后提前结束, 不必像正向扫描那样每次
+// 都读完整个日志文件（日志文件很大时差距明显）；只有当匹配行稀疏、需要的行数很多时才会退化为全文件扫描。
 func readLastLines(filePath, src string, count int) (lines []string, err error) {
+	re, err := regexp.Compile(src)
+	if err != nil {
+		return nil, err
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
@@ -137,19 +150,59 @@ func readLastLines(filePath, src string, count int) (lines []string, err error) 
 		}
 	}()
 
-	re := regexp.MustCompile(src)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		if re.MatchString(scanner.Text()) {
-			lines = append(lines, scanner.Text())
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+
+	const chunkSize = 64 * 1024
+	pos := info.Size()
+	var pending []byte   // 跨块的行残余数据（当前已读区间最前面尚未拼出完整行的部分）
+	var matched []string // 倒序收集到的匹配行, 越靠近文件末尾越靠前
+	first := true
+
+	for pos > 0 && len(matched) < count {
+		readSize := int64(chunkSize)
+		if readSize > pos {
+			readSize = pos
 		}
-		// 超过行数限制后, 舍弃旧行（滑动窗口效果）
-		if len(lines) > count {
-			lines = lines[1:]
+		pos -= readSize
+
+		buf := make([]byte, readSize)
+		if _, err := file.ReadAt(buf, pos); err != nil {
+			return nil, err
+		}
+		buf = append(buf, pending...)
+
+		segments := strings.Split(string(buf), "\n")
+		if first {
+			first = false
+			// 日志文件通常以换行符结尾（每条 log.Printf 都带 \n）, 切分产生的末尾空段不是真正的一行
+			if n := len(segments); n > 0 && segments[n-1] == "" {
+				segments = segments[:n-1]
+			}
+		}
+
+		// segments[0] 可能是跨块的不完整行, 除非已读到文件开头, 否则留到下一轮和更早的数据拼接
+		if pos > 0 {
+			pending = []byte(segments[0])
+			segments = segments[1:]
+		} else {
+			pending = nil
+		}
+
+		for i := len(segments) - 1; i >= 0 && len(matched) < count; i-- {
+			line := strings.TrimSuffix(segments[i], "\r") // 兼容 CRLF, 与 bufio.Scanner 默认行为一致
+			if re.MatchString(line) {
+				matched = append(matched, line)
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return lines, err
+
+	// matched 是从文件末尾往前收集的, 反转成正常的文件先后顺序
+	lines = make([]string, len(matched))
+	for i, line := range matched {
+		lines[len(matched)-1-i] = line
 	}
 	return lines, nil
 }
@@ -233,61 +286,41 @@ func GetClientIP(r *http.Request) string {
 	return "未知IP"
 }
 
-// evictOldestMediaCache 当 cache map 超过 maxCount 时删除最旧的一条
+// evictOldest 当 cache map 超过 maxCount 时删除最旧的一条, timeOf 用于取出每个条目的时间戳。
+// label 仅用于日志, 标明淘汰的是哪种缓存。
+func evictOldest[T any](cache map[string]*T, maxCount int, timeOf func(*T) time.Time, label string) {
+	if len(cache) <= maxCount {
+		return
+	}
+	var oldestKey string
+	var oldestTime time.Time
+	for k, v := range cache {
+		t := timeOf(v)
+		if oldestKey == "" || t.Before(oldestTime) {
+			oldestKey = k
+			oldestTime = t
+		}
+	}
+	if oldestKey != "" {
+		delete(cache, oldestKey)
+		log.Printf("%s已淘汰最旧条目: key=%s", label, oldestKey)
+	}
+}
+
 func evictOldestMediaCache(cache map[string]*MediaCache, maxCount int) {
-	if len(cache) <= maxCount {
-		return
-	}
-	var oldestKey string
-	var oldestTime time.Time
-	for k, v := range cache {
-		if oldestKey == "" || v.Time.Before(oldestTime) {
-			oldestKey = k
-			oldestTime = v.Time
-		}
-	}
-	if oldestKey != "" {
-		delete(cache, oldestKey)
-		log.Printf("媒体缓存已淘汰最旧条目: key=%s", oldestKey)
-	}
+	evictOldest(cache, maxCount, func(v *MediaCache) time.Time { return v.Time }, "媒体缓存")
 }
 
-// evictOldestMsCache 当 cache map 超过 maxCount 时删除最旧的一条 (针对 MsCache)
 func evictOldestMsCache(cache map[string]*MsCache, maxCount int) {
-	if len(cache) <= maxCount {
-		return
-	}
-	var oldestKey string
-	var oldestTime time.Time
-	for k, v := range cache {
-		if oldestKey == "" || v.Time.Before(oldestTime) {
-			oldestKey = k
-			oldestTime = v.Time
-		}
-	}
-	if oldestKey != "" {
-		delete(cache, oldestKey)
-		log.Printf("消息缓存已淘汰最旧条目: key=%s", oldestKey)
-	}
+	evictOldest(cache, maxCount, func(v *MsCache) time.Time { return v.Time }, "消息缓存")
 }
 
-// evictOldestChannelCache 当 cache map 超过 maxCount 时删除最旧的一条 (针对 ChannelInfo)
 func evictOldestChannelCache(cache map[string]*ChannelInfo, maxCount int) {
-	if len(cache) <= maxCount {
-		return
-	}
-	var oldestKey string
-	var oldestTime time.Time
-	for k, v := range cache {
-		if oldestKey == "" || v.Time.Before(oldestTime) {
-			oldestKey = k
-			oldestTime = v.Time
-		}
-	}
-	if oldestKey != "" {
-		delete(cache, oldestKey)
-		log.Printf("消息缓存已淘汰最旧条目: key=%s", oldestKey)
-	}
+	evictOldest(cache, maxCount, func(v *ChannelInfo) time.Time { return v.Time }, "频道缓存")
+}
+
+func evictOldestLatestGroup(cache map[string]*LatestGroup, maxCount int) {
+	evictOldest(cache, maxCount, func(v *LatestGroup) time.Time { return v.Time }, "相册去重缓存")
 }
 
 // mediaCacheKey 生成缓存 key
@@ -295,18 +328,28 @@ func mediaCacheKey(cid int64, mid int32) string {
 	return fmt.Sprintf("%d:%d", cid, mid)
 }
 
-// mediaCacheSizes 根据文件大小计算头部缓存和尾部缓存的大小
-func mediaCacheSizes(size int64) (headSize int64, tailSize int64) {
+// mediaCacheSizes 根据文件大小及配置的最大缓存(maxCacheSize)计算头部缓存和尾部缓存的大小。
+// 每侧缓存受 min(maxCacheSize/2, 8MB) 的上限约束, 使 /size 命令配置的缓存大小真正生效。
+func mediaCacheSizes(size, maxCacheSize int64) (headSize int64, tailSize int64) {
+	if maxCacheSize <= 0 {
+		maxCacheSize = 32 * 1024 * 1024
+	}
+	sideCap := maxCacheSize / 2
+	if sideCap > 8*1024*1024 {
+		sideCap = 8 * 1024 * 1024
+	}
+
 	switch {
 	case size < 2*1024*1024:
 		return
 	case size < 16*1024*1024:
-		count := size / 1024
-		headSize = count / 2 * 1024
-		tailSize = count / 2 * 1024
+		half := size / 1024 / 2 * 1024
+		if half > sideCap {
+			half = sideCap
+		}
+		headSize, tailSize = half, half
 	default:
-		headSize = 8 * 1024 * 1024
-		tailSize = 8 * 1024 * 1024
+		headSize, tailSize = sideCap, sideCap
 	}
 	return
 }
@@ -355,4 +398,31 @@ func sortItems(items []Item, reverse bool) {
 		// false 时从大到小
 		return items[a].MID > items[b].MID
 	})
+}
+
+// contentDisposition 构造安全的 Content-Disposition 头。
+// 对 ASCII 回退字段中的引号/反斜杠做转义、剔除控制字符（防止破坏 quoted-string 语法或注入首部），
+// 并附带 RFC 6266 的 filename* 参数以正确显示中文等非 ASCII 文件名。
+func contentDisposition(disposition, fileName string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, fileName)
+
+	var ascii strings.Builder
+	for _, r := range clean {
+		switch {
+		case r == '\\' || r == '"':
+			ascii.WriteByte('\\')
+			ascii.WriteRune(r)
+		case r > 0x7e:
+			ascii.WriteByte('_')
+		default:
+			ascii.WriteRune(r)
+		}
+	}
+
+	return fmt.Sprintf(`%s; filename="%s"; filename*=UTF-8''%s`, disposition, ascii.String(), url.PathEscape(clean))
 }
