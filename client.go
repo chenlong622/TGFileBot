@@ -868,14 +868,22 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	src := ""
 	kname := params.Cate
 
+	var channelInfo struct {
+		value    any
+		Username string
+	}
 	if len(params.CNames) > 0 {
 		channel, err := infos.handleChannel(params.CNames[0])
 		if err != nil {
 			return result, err
 		}
+		channelInfo.value = params.CNames[0]
+		channelInfo.Username = channel.UserName
 		params.CID = channel.CID
 		src = "name=" + channel.UserName
 		kname += ":" + channel.UserName
+	} else {
+		channelInfo.value = params.CID
 	}
 
 	cidStr := strconv.FormatInt(params.CID, 10)
@@ -941,7 +949,7 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 			Context: params.Ctx,
 			Filter:  params.Filter,
 		}
-		ms, err := client.GetMessages(params.CID, param)
+		ms, err := client.GetMessages(channelInfo.value, param)
 		if err != nil {
 			// RPC 调用失败可能是 TCP 断连引起, 标记失败以便下次请求强制触发 wakeTCP
 			stat.fail()
@@ -955,7 +963,7 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 			}
 			return result, err
 		}
-		result = &MsCache{Mes: ms, Time: time.Now(), Cate: params.Cate}
+		result = &MsCache{Mes: ms, Time: time.Now(), Cate: params.Cate, Username: channelInfo.Username}
 		if len(ms) == params.Limit && (lenMIDs > 0 || params.OffsetID > 0) {
 			infos.Mutex.Lock()
 			evictOldestMsCache(infos.MsCache, infos.MaxMs)

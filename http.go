@@ -811,10 +811,14 @@ func handleSources(w http.ResponseWriter, r *http.Request) {
 	}
 
 	items := Items{
-		Channel: strings.TrimSpace(src.Channel.Title),
-		ID:      src.Channel.Username,
 		HasMore: false,
 		Item:    make([]Item, 0, len(ms)),
+	}
+	if src.Channel != nil {
+		items.Channel = strings.TrimSpace(src.Channel.Title)
+		items.ID = src.Channel.Username
+	} else {
+		items.ID = msCache.Username
 	}
 	filter := int64(0)
 	if len(params.Filters) > 0 {

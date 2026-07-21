@@ -109,10 +109,11 @@ type MediaCache struct {
 }
 
 type MsCache struct {
-	Mes     []telegram.NewMessage
-	Cate    string
-	Time    time.Time
-	Version atomic.Int64
+	Mes      []telegram.NewMessage
+	Username string
+	Cate     string
+	Time     time.Time
+	Version  atomic.Int64
 }
 
 // load 在持有 infos.Mutex 读锁的情况下安全地取出当前消息列表。
