@@ -604,7 +604,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 创建新的 Stream 流管理对象
-		stream := newStream(r.Context(), client, src.Media(), workers, params.MID, params.CID, src.File.Size, fileName)
+		stream := newStream(r.Context(), client, src.Media(), workers, params.MID, params.CID, src.File.Size, fileName, cate)
 		stream.Ms = ms
 
 		// 如果是转发的消息, 重定向源频道以确保分片下载稳定性
@@ -684,7 +684,16 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			if !stream.TCPDead.Load() {
 				infos.tcpStat(cate).touch()
 			} else {
+				// TCP 断开 → 清零状态缓存并异步触发 wakeTCP 主动重连
+				// 使下一个请求能直接使用已恢复的连接, 而不是等待请求到达 handleMs 后再探活
 				infos.tcpStat(cate).reset()
+				go func() {
+					if err := infos.wakeTCP(client, cate); err != nil {
+						log.Printf("TCP 断连后异步重连失败: %+v", err)
+					} else if infos.Conf.Load().DeBUG {
+						log.Printf("TCP 断连后异步重连成功")
+					}
+				}()
 			}
 		}()
 

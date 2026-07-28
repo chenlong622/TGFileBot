@@ -43,6 +43,7 @@ type Stream struct {
 	Version      atomic.Int64           // 文件版本号, 因引用过期刷新后递增
 	Init         atomic.Bool            // 是否已经初始化
 	TCPDead      atomic.Bool            // TCP 是否断开
+	Cate         string                 // 客户端类别 ("user"/"bot"), 用于标记主客户端 TCP 状态
 	Mutex        *sync.Mutex            // 用于保护并发安全
 	Tasks        chan *Task             // 任务管道, 用于向工作协程分发下载任务
 	Client       *telegram.Client       // Gogram 客户端实例
@@ -60,7 +61,7 @@ func newTask() *Task {
 }
 
 // newStream 初始化并返回一个 Stream 对象, 负责管理特定文件的流式下载
-func newStream(ctx context.Context, client *telegram.Client, media telegram.MessageMedia, workers int, mid int32, cid, contentSize int64, name string) *Stream {
+func newStream(ctx context.Context, client *telegram.Client, media telegram.MessageMedia, workers int, mid int32, cid, contentSize int64, name, cate string) *Stream {
 	// 根据并发数动态调整分片大小
 	chunkSize := int64(1 * 1024 * 1024)
 	// 默认 32MB 缓存
@@ -83,6 +84,7 @@ func newStream(ctx context.Context, client *telegram.Client, media telegram.Mess
 		FileName:     name,
 		MID:          mid,
 		CID:          cid,
+		Cate:         cate,
 		ContentSize:  contentSize,
 		ChunkSize:    chunkSize, // 这里设置了固定值, 可以根据需要调整
 		MaxCacheSize: maxCacheSize,
@@ -222,6 +224,10 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					return
 				case errors.Is(err, telegram.ErrWorkerTCPDead):
 					stream.TCPDead.Store(true)
+					// 立即标记主客户端 TCP 状态为失败, 使并发请求能及时感知断连
+					// 而不是等到 stream defer 中才通过 reset() 处理（存在竞态窗口）
+					infos.tcpStat(stream.Cate).fail()
+					log.Printf("协程%d: 检测到 TCP 链路断开, 已标记主客户端需要重连: cid=%d, mid=%d, name=%s", numTask, stream.CID, stream.MID, stream.FileName)
 					task.Error = err
 					close(task.Content)
 					return

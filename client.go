@@ -953,6 +953,12 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 		if err != nil {
 			// RPC 调用失败可能是 TCP 断连引起, 标记失败以便下次请求强制触发 wakeTCP
 			stat.fail()
+			// 异步尝试重连, 使后续请求到达时连接可能已恢复
+			go func() {
+				if err := infos.wakeTCP(client, params.Cate); err != nil {
+					log.Printf("RPC 失败后异步重连失败: %+v", err)
+				}
+			}()
 			return result, err
 		}
 
