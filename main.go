@@ -165,11 +165,6 @@ func (s *TCPStatu) wake(latenc int64) {
 	s.Fails.Store(0)
 }
 
-// reset 清空唤醒时间, 强制下一次请求重新触发 wakeTCP
-func (s *TCPStatu) reset() {
-	s.WakeTime.Store(0)
-}
-
 // touch 仅刷新唤醒时间, 不改变已记录的延迟; 同时清零连续失败计数
 func (s *TCPStatu) touch() {
 	s.WakeTime.Store(time.Now().UnixNano())
@@ -177,9 +172,16 @@ func (s *TCPStatu) touch() {
 }
 
 // fail 递增连续失败计数并清空唤醒时间, 使下一个请求强制走 wakeTCP 重连探活
-func (s *TCPStatu) fail() {
-	s.Fails.Add(1)
-	s.WakeTime.Store(0)
+func (s *TCPStatu) fail(client *telegram.Client) {
+	if client != nil {
+		if !client.IsConnected() {
+			s.Fails.Add(1)
+			s.WakeTime.Store(0)
+		}
+	} else {
+		s.Fails.Add(1)
+		s.WakeTime.Store(0)
+	}
 }
 
 // since 返回距离上次探活/唤醒过去的时长

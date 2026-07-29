@@ -674,10 +674,11 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 
 	ms := msCache.load()
 	lenMs := len(ms)
-	switch {
-	case lenMs == 0:
+
+	switch lenMs {
+	case 0:
 		return items, errors.New("未找到匹配消息")
-	case lenMs == limit:
+	case limit:
 		handleOffset("set", fmt.Sprintf("%s|%d", channel, page+1), ms[lenMs-1].ID)
 		items.HasMore = true
 	}
@@ -696,6 +697,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 
 	mids := make(map[int32]bool)
 	maxNum := len(ms) - 1
+	TCPDead := false
 	for num, m := range ms {
 		if m.File == nil {
 			continue
@@ -720,6 +722,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 			medias, err := m.GetMediaGroup()
 			if err != nil {
 				log.Printf("提取媒体组错误: %+v", err)
+				TCPDead = true
 			}
 
 			count := 0
@@ -757,6 +760,20 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 
 	sortItems(items.Item, reverse)
 	items.ID = channel
+
+	if TCPDead {
+		go func() {
+			infos.tcpStat("user").fail(infos.UserClient.Load())
+			status := infos.tcpStat("user").Fails.Load()
+			if status > 0 {
+				if err := infos.wakeTCP(infos.UserClient.Load(), "user"); err != nil {
+					log.Printf("TCP 重连失败: %+v", err)
+				} else if infos.Conf.Load().DeBUG {
+					log.Print("TCP 重连成功")
+				}
+			}
+		}()
+	}
 	return items, nil
 }
 
@@ -792,10 +809,10 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 
 	ms := msCache.load()
 	lenMs := len(ms)
-	switch {
-	case lenMs == 0:
+	switch lenMs {
+	case 0:
 		return items, errors.New("未找到匹配消息")
-	case lenMs == limit:
+	case limit:
 		key := fmt.Sprintf("%s|%s|%d", channel, keywords, page+1)
 		handleOffset("set", key, ms[lenMs-1].ID)
 		items.HasMore = true
@@ -951,12 +968,13 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 		}
 		ms, err := client.GetMessages(channelInfo.value, param)
 		if err != nil {
-			// RPC 调用失败可能是 TCP 断连引起, 标记失败以便下次请求强制触发 wakeTCP
-			stat.fail()
 			// 异步尝试重连, 使后续请求到达时连接可能已恢复
 			go func() {
+				stat.fail(client)
 				if err := infos.wakeTCP(client, params.Cate); err != nil {
-					log.Printf("RPC 失败后异步重连失败: %+v", err)
+					log.Printf("TCP 重连失败: %+v", err)
+				} else if infos.Conf.Load().DeBUG {
+					log.Print("TCP 重连成功")
 				}
 			}()
 			return result, err
@@ -1007,6 +1025,17 @@ func (infos *Infos) refreshMs(client *telegram.Client, version int64, params Han
 		Context: params.Ctx,
 	})
 	if err != nil {
+		go func() {
+			status := infos.tcpStat(params.Cate)
+			status.fail(client)
+			if status.Fails.Load() > 0 {
+				if err := infos.wakeTCP(client, params.Cate); err != nil {
+					log.Printf("TCP 重连失败: %+v", err)
+				} else if infos.Conf.Load().DeBUG {
+					log.Print("TCP 重连成功")
+				}
+			}
+		}()
 		log.Printf("刷新文件引用失败: %+v", err)
 		return src, err
 	}
@@ -1057,8 +1086,20 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 				AccessHash: result.Hash,
 			}
 		} else {
-			values, err := infos.UserClient.Load().ResolvePeer(channel)
+			client := infos.UserClient.Load()
+			values, err := client.ResolvePeer(channel)
 			if err != nil {
+				go func() {
+					status := infos.tcpStat("user")
+					status.fail(client)
+					if status.Fails.Load() > 0 {
+						if err := infos.wakeTCP(client, "user"); err != nil {
+							log.Printf("TCP 重连失败: %+v", err)
+						} else if infos.Conf.Load().DeBUG {
+							log.Print("TCP 重连成功")
+						}
+					}
+				}()
 				log.Printf("频道解析失败: %+v", err)
 				return result, err
 			}
@@ -1145,7 +1186,8 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 				AccessHash: channelInfo.Hash,
 			}
 		}
-		results, err := infos.UserClient.Load().MessagesGetReplies(&telegram.MessagesGetRepliesParams{
+		client := infos.UserClient.Load()
+		results, err := client.MessagesGetReplies(&telegram.MessagesGetRepliesParams{
 			Peer:     channelInfo.Peer,
 			Limit:    int32(limit),
 			OffsetID: offset,
@@ -1153,6 +1195,17 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 		})
 
 		if err != nil {
+			go func() {
+				status := infos.tcpStat("user")
+				status.fail(client)
+				if status.Fails.Load() > 0 {
+					if err := infos.wakeTCP(client, "user"); err != nil {
+						log.Printf("TCP 重连失败: %+v", err)
+					} else if infos.Conf.Load().DeBUG {
+						log.Print("TCP 重连成功")
+					}
+				}
+			}()
 			log.Printf("获取评论消息失败: cid=%d, mid=%d, err=%v", src.Channel.ID, mid, err)
 			return false, err
 		}
@@ -1178,7 +1231,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 		var discussionChannel *telegram.Channel
 		for _, ch := range chats {
 			if channel, ok := ch.(*telegram.Channel); ok {
-				infos.UserClient.Load().Cache.UpdateChannel(channel)
+				client.Cache.UpdateChannel(channel)
 				if channel.ID == discussionID {
 					discussionChannel = channel
 				}
@@ -1191,7 +1244,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 		// PackMessages 将 []telegram.Message 转为 []*telegram.NewMessage；
 		// 上面已注册频道缓存，这里再兜底纠正一次 Channel(此前误写为 Chat.ID，对 item.CID 无效果)
 		startLen := len(*ms)
-		for _, nm := range telegram.PackMessages(infos.UserClient.Load(), newMs) {
+		for _, nm := range telegram.PackMessages(client, newMs) {
 			if !nm.IsMedia() {
 				continue
 			}

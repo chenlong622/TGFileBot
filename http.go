@@ -323,7 +323,8 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 			Ctx:       r.Context(),
 		})
 		if err != nil {
-			if telegram.MatchError(err, "FILE_REFERENCE_EXPIRED") {
+			switch {
+			case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
 				if infos.Conf.Load().DeBUG {
 					log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
 				}
@@ -333,9 +334,28 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				buf.Reset()
-			} else {
-				stat.fail()
+			case errors.Is(err, telegram.ErrWorkerTCPDead):
+				go func() {
+					stat.fail(nil)
+					if err := infos.wakeTCP(client, params.Cate); err != nil {
+						log.Printf("TCP 重连失败: %+v", err)
+					} else if infos.Conf.Load().DeBUG {
+						log.Print("TCP 重连成功")
+					}
+				}()
+				return
+			default:
 				http.Error(w, err.Error(), http.StatusInternalServerError)
+				go func() {
+					stat.fail(client)
+					if stat.Fails.Load() > 0 {
+						if err := infos.wakeTCP(client, params.Cate); err != nil {
+							log.Printf("TCP 重连失败: %+v", err)
+						} else if infos.Conf.Load().DeBUG {
+							log.Print("TCP 重连成功")
+						}
+					}
+				}()
 				return
 			}
 		} else {
@@ -343,6 +363,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+
 	if !success {
 		http.Error(w, "下载封面失败: 文件引用持续过期", http.StatusInternalServerError)
 		return
@@ -556,7 +577,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 				Ctx:       r.Context(),
 			})
 			if err != nil {
-				if telegram.MatchError(err, "FILE_REFERENCE_EXPIRED") {
+				switch {
+				case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
 					if infos.Conf.Load().DeBUG {
 						log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
 					}
@@ -566,9 +588,30 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					buf.Reset()
-				} else {
-					infos.tcpStat(cate).fail()
+				case errors.Is(err, telegram.ErrWorkerTCPDead):
+					go func() {
+						status := infos.tcpStat(cate)
+						status.fail(nil)
+						if err := infos.wakeTCP(client, cate); err != nil {
+							log.Printf("TCP 重连失败: %+v", err)
+						} else if infos.Conf.Load().DeBUG {
+							log.Print("TCP 重连成功")
+						}
+					}()
+					return
+				default:
 					http.Error(w, err.Error(), http.StatusInternalServerError)
+					go func() {
+						status := infos.tcpStat(cate)
+						status.fail(client)
+						if status.Fails.Load() > 0 {
+							if err := infos.wakeTCP(client, cate); err != nil {
+								log.Printf("TCP 重连失败: %+v", err)
+							} else if infos.Conf.Load().DeBUG {
+								log.Print("TCP 重连成功")
+							}
+						}
+					}()
 					return
 				}
 			} else {
@@ -678,20 +721,16 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 			// 异步清理：不阻塞当前请求 goroutine 返回，使新请求能立即被处理
 			go stream.clean()
-
 			// TCP 正常 → 记录唤醒时间，下次 30 分钟内跳过 wakeTCP
 			// TCP 断开 → 清零，下次请求强制触发 wakeTCP 探活重连
 			if !stream.TCPDead.Load() {
 				infos.tcpStat(cate).touch()
 			} else {
-				// TCP 断开 → 清零状态缓存并异步触发 wakeTCP 主动重连
-				// 使下一个请求能直接使用已恢复的连接, 而不是等待请求到达 handleMs 后再探活
-				infos.tcpStat(cate).reset()
 				go func() {
 					if err := infos.wakeTCP(client, cate); err != nil {
-						log.Printf("TCP 断连后异步重连失败: %+v", err)
+						log.Printf("TCP 重连失败: %+v", err)
 					} else if infos.Conf.Load().DeBUG {
-						log.Printf("TCP 断连后异步重连成功")
+						log.Print("TCP 重连成功")
 					}
 				}()
 			}

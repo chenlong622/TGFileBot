@@ -224,9 +224,8 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					return
 				case errors.Is(err, telegram.ErrWorkerTCPDead):
 					// 立即标记主客户端 TCP 状态为失败, 使并发请求能及时感知断连
-					// 而不是等到 stream defer 中才通过 reset() 处理（存在竞态窗口）
 					if stream.TCPDead.CompareAndSwap(false, true) {
-						infos.tcpStat(stream.Cate).fail()
+						infos.tcpStat(stream.Cate).fail(nil)
 						log.Printf("检测到 TCP 链路断开, 等待主客户端重连: cid=%d, mid=%d, name=%s", stream.CID, stream.MID, stream.FileName)
 					}
 					task.Error = err
