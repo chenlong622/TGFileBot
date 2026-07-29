@@ -731,8 +731,6 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 				}()
 			}
-			// TCP 正常但请求异常退出（ctx 取消/超时/下载错误）→ 不碰 touch()，
-			// 保留 fail() 可能已设的断连标记，使下一个请求的 handleMs 能感知
 		}()
 
 		// 10. 循环从下载管道读取分片并写入 HTTP 响应体
@@ -787,7 +785,16 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						// 检查是否已经写完当前请求的所有范围
 						if task.ContentEnd >= end {
 							log.Printf("流式传输文件已完成: cid=%d, mid=%d, name=%s", params.CID, params.MID, fileName)
-							infos.tcpStat(cate).touch()
+							status := infos.tcpStat(cate)
+							if status.TCPDead.Load() {
+								if err := infos.wakeTCP(client, cate); err != nil {
+									log.Printf("TCP 重连失败: %+v", err)
+								} else if infos.Conf.Load().DeBUG {
+									log.Print("TCP 重连成功")
+								}
+							} else {
+								status.touch()
+							}
 							return
 						}
 						task = nil

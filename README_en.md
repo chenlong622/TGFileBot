@@ -517,8 +517,10 @@ Addressing the `file_reference` expiration issue within Telegram:
 
 - **Progressive Retry**: Network timeouts use exponential backoff (500ms → 1s → 1.5s → 2s).
 - **Flood Handling**: Intelligently parses Telegram rate limit errors, automatically extracts wait times, and synchronizes all coroutines globally.
-- **TCP Keep-alive**: Automatically sends a Ping probe for 30-minute idle connections, seamless reconnection.
-- **Connection Pool Management**: Each download coroutine is equipped with an independent connection pool to avoid connection contention.
+- **Instant TCP Disconnection Detection**: Tracks connection status in real-time via a `TCPDead` atomic flag; download coroutines immediately mark disconnection and trigger wake-up upon `ErrWorkerTCPDead`.
+- **Intelligent Keep-alive Probing**: `handleMs` checks `TCPDead` before each request, automatically sends a Ping probe on disconnection with transparent reconnection; abnormal exits preserve the disconnection flag to ensure no missed detection.
+- **Connection Timeout Control**: Timeout limits for both connection establishment and idle connections to prevent zombie connections.
+- **Isolated Connection Pools**: Each download coroutine has an independent connection pool to avoid contention; automatically rebuilt on disconnection.
 
 ### 5. Permission Management Architecture
 
@@ -781,11 +783,12 @@ This project is licensed under the [Apache 2.0](LICENSE) License.
 
 ## Changelog
 
-### v1.1.3 (Current Version)
+### v1.1.4 (Current Version)
 - ✅ Enhanced concurrent download stability
 - ✅ Optimized cache management strategies
 - ✅ Improved error handling and logging
 - ✅ Supported more search filtering options
+- ✅ Optimized TCP disconnection detection and automatic recovery
 
 ### v1.0.0
 - ✅ Initial release, supporting basic streaming downloads and Bot management
