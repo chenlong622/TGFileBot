@@ -155,31 +155,32 @@ type ID struct {
 type TCPStatu struct {
 	Latenc   atomic.Int64 // 延迟, 单位毫秒
 	WakeTime atomic.Int64 // 最近一次探活/唤醒时间, UnixNano; 零值表示"从未探活", 会强制触发下一次 wakeTCP
-	Fails    atomic.Int64 // 连续下载失败计数; > 0 时 handleMs 跳过 30 分钟阈值, 强制触发 wakeTCP
+	TCPDead  atomic.Bool  // TCP 是否断开
 }
 
-// wake 记录一次成功的探活/唤醒, 更新延迟和唤醒时间, 同时清零连续失败计数
+// wake 记录一次成功的探活/唤醒, 更新延迟和唤醒时间, 标记 TCP 为正常
 func (s *TCPStatu) wake(latenc int64) {
 	s.Latenc.Store(latenc)
 	s.WakeTime.Store(time.Now().UnixNano())
-	s.Fails.Store(0)
+	s.TCPDead.Store(false)
 }
 
-// touch 仅刷新唤醒时间, 不改变已记录的延迟; 同时清零连续失败计数
+// touch 刷新唤醒时间并标记 TCP 为正常
+// 仅当 TCP 正常时才调用，此时连接已恢复，可以安全重置
 func (s *TCPStatu) touch() {
 	s.WakeTime.Store(time.Now().UnixNano())
-	s.Fails.Store(0)
+	s.TCPDead.Store(false)
 }
 
-// fail 递增连续失败计数并清空唤醒时间, 使下一个请求强制走 wakeTCP 重连探活
+// fail 标记 TCP 断开并清空唤醒时间, 使下一个请求强制走 wakeTCP 重连探活
 func (s *TCPStatu) fail(client *telegram.Client) {
 	if client != nil {
 		if !client.IsConnected() {
-			s.Fails.Add(1)
+			s.TCPDead.Store(true)
 			s.WakeTime.Store(0)
 		}
 	} else {
-		s.Fails.Add(1)
+		s.TCPDead.Store(true)
 		s.WakeTime.Store(0)
 	}
 }
@@ -328,9 +329,12 @@ func main() {
 	// 6. 在独立协程中启动 HTTP 服务
 	go func() {
 		log.Printf("HTTP 服务运行在 %d 端口", conf.Port)
-
 		if err := server.ListenAndServe(); err != nil {
-			log.Printf("HTTP 服务启动失败: %+v", err)
+			if err != http.ErrServerClosed {
+				log.Printf("HTTP 服务启动失败: %+v", err)
+			} else {
+				log.Printf("HTTP 服务已关闭")
+			}
 			statusChan <- os.Interrupt
 		}
 	}()

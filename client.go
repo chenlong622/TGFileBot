@@ -764,8 +764,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 	if TCPDead {
 		go func() {
 			infos.tcpStat("user").fail(infos.UserClient.Load())
-			status := infos.tcpStat("user").Fails.Load()
-			if status > 0 {
+			if infos.tcpStat("user").TCPDead.Load() {
 				if err := infos.wakeTCP(infos.UserClient.Load(), "user"); err != nil {
 					log.Printf("TCP 重连失败: %+v", err)
 				} else if infos.Conf.Load().DeBUG {
@@ -857,10 +856,10 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	latenc := stat.Latenc.Load()
 	duration := stat.since()
 
-	// 2. 统一处理 TCP 链路检查与唤醒逻辑（彻底去除了重复代码）
-	// 当连续失败计数 > 0 时, 无视 30 分钟阈值强制触发探活重连
+	// 2. 统一处理 TCP 链路检查与唤醒逻辑
+	// 当 TCPDead 为 true 或距离上次唤醒超过 30 分钟时强制触发探活重连
 	switch {
-	case duration.Minutes() > 30 || stat.Fails.Load() > 0:
+	case duration.Minutes() > 30 || stat.TCPDead.Load():
 		if err = infos.wakeTCP(client, params.Cate); err != nil {
 			log.Printf("唤醒 TCP 连接失败: %+v", err)
 			return result, err
@@ -1028,7 +1027,7 @@ func (infos *Infos) refreshMs(client *telegram.Client, version int64, params Han
 		go func() {
 			status := infos.tcpStat(params.Cate)
 			status.fail(client)
-			if status.Fails.Load() > 0 {
+			if status.TCPDead.Load() {
 				if err := infos.wakeTCP(client, params.Cate); err != nil {
 					log.Printf("TCP 重连失败: %+v", err)
 				} else if infos.Conf.Load().DeBUG {
@@ -1092,7 +1091,7 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 				go func() {
 					status := infos.tcpStat("user")
 					status.fail(client)
-					if status.Fails.Load() > 0 {
+					if status.TCPDead.Load() {
 						if err := infos.wakeTCP(client, "user"); err != nil {
 							log.Printf("TCP 重连失败: %+v", err)
 						} else if infos.Conf.Load().DeBUG {
@@ -1198,7 +1197,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 			go func() {
 				status := infos.tcpStat("user")
 				status.fail(client)
-				if status.Fails.Load() > 0 {
+				if status.TCPDead.Load() {
 					if err := infos.wakeTCP(client, "user"); err != nil {
 						log.Printf("TCP 重连失败: %+v", err)
 					} else if infos.Conf.Load().DeBUG {

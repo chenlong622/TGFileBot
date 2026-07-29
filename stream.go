@@ -42,7 +42,6 @@ type Stream struct {
 	Count        atomic.Int64           // 当前正在运行的协程数量
 	Version      atomic.Int64           // 文件版本号, 因引用过期刷新后递增
 	Init         atomic.Bool            // 是否已经初始化
-	TCPDead      atomic.Bool            // TCP 是否断开
 	Cate         string                 // 客户端类别 ("user"/"bot"), 用于标记主客户端 TCP 状态
 	Mutex        *sync.Mutex            // 用于保护并发安全
 	Tasks        chan *Task             // 任务管道, 用于向工作协程分发下载任务
@@ -224,8 +223,9 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					return
 				case errors.Is(err, telegram.ErrWorkerTCPDead):
 					// 立即标记主客户端 TCP 状态为失败, 使并发请求能及时感知断连
-					if stream.TCPDead.CompareAndSwap(false, true) {
-						infos.tcpStat(stream.Cate).fail(nil)
+					status := infos.tcpStat(stream.Cate)
+					if status.TCPDead.CompareAndSwap(false, true) {
+						status.fail(nil)
 						log.Printf("检测到 TCP 链路断开, 等待主客户端重连: cid=%d, mid=%d, name=%s", stream.CID, stream.MID, stream.FileName)
 					}
 					task.Error = err

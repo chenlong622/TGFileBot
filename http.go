@@ -348,7 +348,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				go func() {
 					stat.fail(client)
-					if stat.Fails.Load() > 0 {
+					if stat.TCPDead.Load() {
 						if err := infos.wakeTCP(client, params.Cate); err != nil {
 							log.Printf("TCP 重连失败: %+v", err)
 						} else if infos.Conf.Load().DeBUG {
@@ -604,7 +604,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					go func() {
 						status := infos.tcpStat(cate)
 						status.fail(client)
-						if status.Fails.Load() > 0 {
+						if status.TCPDead.Load() {
 							if err := infos.wakeTCP(client, cate); err != nil {
 								log.Printf("TCP 重连失败: %+v", err)
 							} else if infos.Conf.Load().DeBUG {
@@ -623,8 +623,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "下载失败: 文件引用持续过期", http.StatusInternalServerError)
 			return
 		}
-
 		infos.tcpStat(cate).touch()
+
 		content := buf.Bytes()
 		if ranHeader == "" {
 			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
@@ -721,11 +721,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 			// 异步清理：不阻塞当前请求 goroutine 返回，使新请求能立即被处理
 			go stream.clean()
-			// TCP 正常 → 记录唤醒时间，下次 30 分钟内跳过 wakeTCP
-			// TCP 断开 → 清零，下次请求强制触发 wakeTCP 探活重连
-			if !stream.TCPDead.Load() {
-				infos.tcpStat(cate).touch()
-			} else {
+			// TCP 断开 → 立即唤醒（无论当前请求成功与否）
+			if infos.tcpStat(cate).TCPDead.Load() {
 				go func() {
 					if err := infos.wakeTCP(client, cate); err != nil {
 						log.Printf("TCP 重连失败: %+v", err)
@@ -734,6 +731,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 				}()
 			}
+			// TCP 正常但请求异常退出（ctx 取消/超时/下载错误）→ 不碰 touch()，
+			// 保留 fail() 可能已设的断连标记，使下一个请求的 handleMs 能感知
 		}()
 
 		// 10. 循环从下载管道读取分片并写入 HTTP 响应体
@@ -788,6 +787,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						// 检查是否已经写完当前请求的所有范围
 						if task.ContentEnd >= end {
 							log.Printf("流式传输文件已完成: cid=%d, mid=%d, name=%s", params.CID, params.MID, fileName)
+							infos.tcpStat(cate).touch()
 							return
 						}
 						task = nil
