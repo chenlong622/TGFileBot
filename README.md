@@ -2,7 +2,7 @@
 
 [English](README_en.md) | [中文](README.md)
 
-TGFileBot 是一个 Telegram Bot 和 UserBot 深度结合的开源项目，旨在提供高性能的文件直链提取、媒体分片流式传输以及完善的远程机器人管理功能。
+TGFileBot 是一个 TeleBot 和 UserBot 深度结合的开源项目，旨在提供高性能的文件直链提取、媒体分片流式传输以及完善的远程机器人管理功能。
 
 > ⚠️ **重要提示**: 本项目使用了修改版的 [gogram](https://github.com/lm317379829/gogram) 库。
 
@@ -40,11 +40,13 @@ TGFileBot 是一个 Telegram Bot 和 UserBot 深度结合的开源项目，旨�
   "id": 123456789,
   "hash": "your_api_hash_here",
   "site": "https://example.com",
+  "proxy": "",
   "botToken": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg",
   "userID": 987654321,
   "password": "your_optional_password",
   "dc": 0,
   "workers": 2,
+  "maxSize": 33554432,
   "channelID": 0,
   "adminIDs": [987654321],
   "whiteIDs": [987654321],
@@ -63,10 +65,12 @@ TGFileBot 是一个 Telegram Bot 和 UserBot 深度结合的开源项目，旨�
 | `hash` | 字符串 | 是 | - | Telegram API Hash（从 my.telegram.org 获取）|
 | `site` | 字符串 | 是 | - | 反代域名或服务器 IP，用于生成直链，必须包含 http(s) 协议 |
 | `botToken` | 字符串 | 是 | - | Bot Token（从 @BotFather 获取）|
+| `proxy` | 字符串 | 否 | 空 | 代理服务器地址（支持 SOCKS、HTTP、MTProxy、TG 协议），用于连接 Telegram |
 | `userID` | 整数 | 是 | - | 主管理员 Telegram 用户 ID（UserBot 对应的账号）|
 | `password` | 字符串 | 否 | 空 | 接口访问密码（若设置则所有 API 调用需鉴权）|
 | `dc` | 整数 | 否 | 0 | Telegram 数据中心 ID（1-5，0 表示自动选择，遇连接问题可指定）|
 | `workers` | 整数 | 否 | 1 | 并发下载协程数（1-4 推荐，过高易触发风控）|
+| `maxSize` | 整数 | 否 | 32MB | 最大缓存大小（字节），同时约束头部/尾部分片缓存的上限分配 |
 | `channelID` | 整数 | 否 | 0 | 绑定的默认频道 ID（可在 API 中省略 `cid` 参数）|
 | `adminIDs` | 数组 | 否 | [] | 辅助管理员 ID 列表（拥有大部分权限，不含登录权限）|
 | `whiteIDs` | 数组 | 否 | [] | 白名单 ID 列表（仅可使用基本功能）|
@@ -85,7 +89,7 @@ go run main.go [options]
 | 参数 | 说明 |
 |------|------|
 | `-files <path>` | 指定存放配置文件、会话文件和缓存的目录（默认为 `files`） |
-| `-log <path>` | 指定日志文件路径（默认为 `files/log.log`，空字符串表示不记录文件日志）|
+| `-log <path>` | 指定日志文件路径（默认空字符串，表示不记录文件日志；指定后日志同时写入控制台与文件）|
 | `-version`, `-v` | 打印程序版本号并退出 |
 
 ### 5. 运行项目
@@ -170,7 +174,7 @@ docker stop tgfilebot
 | `/proxy <URL>` | 设置代理（支持 SOCKS、HTTP、MTProxy 和 TG 协议，`off` 关闭）| 管理员 | `/proxy socks5://proxy.example.com:1080` |
 | `/dc <ID>` | 指定 UserBot 的数据中心（1-5） | 管理员 | `/dc 2` |
 | `/allow <ID>` | 将用户 ID 添加到白名单 | 管理员 | `/allow 123456789` |
-| `/disallow <ID>` | 从白名单中移除用户 ID 或按索引删除 | 管理员 | `/disallow 0` 或 `/disallow 123456789` |
+| `/disallow <ID>` | 从白名单中移除用户 ID 或按索引（`#N`）删除 | 管理员 | `/disallow #0` 或 `/disallow 123456789` |
 | `/channel <ID>` | 动态设置绑定的默认频道 ID | 管理员 | `/channel 1001234567890` |
 | `/workers <1-4>` | 动态调整并发下载协程数 | 管理员 | `/workers 2` |
 | `/site <URL>` | 动态更新生成直链的域名/反代地址 | 管理员 | `/site https://newdomain.com` |
@@ -179,9 +183,9 @@ docker stop tgfilebot
 | `/check <hash>` | 查看哈希值对应的用户信息 | 管理员 | `/check a1b2c3` |
 | `/port <端口>` | 动态设置 HTTP 服务端口（重启后生效）| 管理员 | `/port 8081` |
 | `/add <别名>` | 添加搜索频道别名（用于搜索功能）| 管理员 | `/add @mychannel` 或 `/add mychannel` |
-| `/del <别名或索引>` | 移除搜索频道别名 | 管理员 | `/del 0` 或 `/del mychannel` |
+| `/del <别名或索引>` | 移除搜索频道别名（`#N` 按索引，否则按别名）| 管理员 | `/del #0` 或 `/del mychannel` |
 | `/addrule <正则>` | 添加正则过滤规则（用于过滤群组消息）| 管理员 | `/addrule .*spam.*` |
-| `/delrule <索引或内容>` | 移除正则过滤规则 | 管理员 | `/delrule 0` 或 `/delrule .*spam.*` |
+| `/delrule <索引或内容>` | 移除正则过滤规则（`#N` 按索引，否则按内容）| 管理员 | `/delrule #0` 或 `/delrule .*spam.*` |
 | `/list <类别>` | 列出指定类别的配置 | 管理员 | `/list channels` 或 `/list ids` 或 `/list rules` |
 
 ### 获取直链
@@ -208,7 +212,7 @@ docker stop tgfilebot
 **响应示例**:
 ```json
 {
-  "版本": "v1.1.2",
+  "版本": "v1.1.4",
   "域名": "https://example.com",
   "端口": 8080,
   "缓存": "32 MB",
@@ -236,6 +240,7 @@ docker stop tgfilebot
 | 参数 | 必填 | 说明 |
 |:---|:---:|:---|
 | `cid` | 否 | 频道 ID（负数形式，如 `-1001234567890`）。若 `config.json` 中已设置 `channelID` 则可省略 |
+| `cname` | 否 | 频道用户名/别名（如 `@mychannel`），与 `cid` 二选一，可解析公开或私有频道 |
 | `mid` | 是 | 消息 ID（正整数）|
 | `cate` | 否 | 下载客户端选择：`user`（使用 UserBot，可访问私有频道）或 `bot`（默认）。UserBot 未登录时自动回退到 Bot |
 | `download` | 否 | 设为 `true` 时以附件模式下载（`Content-Disposition: attachment`），否则为内联播放 |
@@ -262,6 +267,7 @@ docker stop tgfilebot
 | 参数 | 必填 | 说明 |
 |:---|:---:|:---|
 | `cid` | 否 | 频道 ID（负数形式，如 `-1001234567890`）。若 `config.json` 中已设置 `channelID` 则可省略 |
+| `cname` | 否 | 频道用户名/别名（如 `@mychannel`），与 `cid` 二选一 |
 | `mid` | 是 | 消息 ID（正整数）|
 | `cate` | 否 | 下载客户端选择：`user`（使用 UserBot）或 `bot`（默认） |
 | `key` / `hash` / `uid` | 否* | 鉴权参数（设置了 `password` 时必填其一）|
@@ -285,6 +291,8 @@ docker stop tgfilebot
 | `key` | 否* | 明文访问密码(与hash二选一) |
 | `hash` | 否* | 哈希鉴权(与key二选一) |
 | `uid` | 否* | 使用 `hash` 时对应的用户 ID |
+| `offset` | 否 | 评论偏移 ID（用于带评论链接的分页）|
+| `reverse` | 否 | 是否反序排序返回结果，默认 `false` |
 
 **支持的链接格式**:
 - 私有频道: `https://t.me/c/1234567890/100`
@@ -332,11 +340,11 @@ docker stop tgfilebot
 
 | 参数 | 必填 | 说明 |
 |:---|:---:|:---|
-| `cname` | 是 | 频道别名/用户名（例如 `@channelname` 或 `channelname`） |
+| `cname` | 是 | 频道别名/用户名（例如 `@channelname` 或 `channelname`），可逗号分隔传多个频道，同时返回多份列表 |
 | `page` | 否 | 页码，默认 `1` |
 | `offset` | 否 | 结果偏移ID，用于翻页，默认 `0` |
 | `limit` | 否 | 每页返回数量，默认 `20`，最大 `100` |
-| `filter` | 否 | 过滤文件大小，如 `10M`，仅返回大于此大小的文件，默认 `128K` |
+| `filter` | 否 | 过滤文件大小，如 `10M`，仅返回大于此大小的文件，默认 `128K`（仅作用于视频文件；可对多个 `cname` 传入逗号分隔的多个值，与频道一一对应）|
 | `reverse` | 否 | 是否反序排列，默认 `false` |
 | `key` / `hash` / `uid` | 否* | 鉴权参数（同上） |
 
@@ -383,7 +391,7 @@ docker stop tgfilebot
 | `page` | 否 | 页码，默认 `1` |
 | `limit` | 否 | 每页返回数量，默认 `20`，最大 `100` |
 | `offset` | 否 | 结果偏移ID，用于翻页，默认 `0` |
-| `filter` | 否 | 过滤文件大小，默认 `128K` |
+| `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件；可对多个频道传入逗号分隔的多个值，与频道一一对应）|
 | `reverse` | 否 | 是否反序排列，默认 `false` |
 | `cname` | 否 | 指定搜索的频道别名（逗号分隔多个），不指定则搜索所有已配置频道 |
 | `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
@@ -429,8 +437,29 @@ docker stop tgfilebot
 |:---|:---:|:---|
 | `cid` 或 `cname` | 是 | 频道 ID 或用户名（两者二选一）|
 | `mid` | 是 | 消息ID |
-| `filter` | 否 | 过滤文件大小，默认 `128K` |
+| `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件）|
 | `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
+
+**响应示例**:
+```json
+{
+  "more": false,
+  "id": "mychannel",
+  "channel": "My Channel Name",
+  "item": [
+    {
+      "ext": ".mp4",
+      "src": "Video Title",
+      "name": "example.mp4",
+      "mid": 100,
+      "cid": -1001234567890,
+      "gid": 123456,
+      "size": 104857600,
+      "date": 1672531200
+    }
+  ]
+}
+```
 
 ---
 
@@ -440,16 +469,41 @@ docker stop tgfilebot
 
 **URL 格式**:
 ```
-/comments?cid={频道ID}&cname={频道用户名}&mid={消息ID}&offset={偏移ID}&filter={过滤大小}&key={key}
+/comments?cid={频道ID}&cname={频道用户名}&mid={消息ID}&offset={偏移ID}&page={页码}&filter={过滤大小}&key={key}
 ```
 
 | 参数 | 必填 | 说明 |
 |:---|:---:|:---|
 | `cid` 或 `cname` | 是 | 频道 ID 或用户名（两者二选一）|
 | `mid` | 是 | 消息ID |
-| `offset` | 是 | 评论的偏移ID（用于分页）|
-| `filter` | 否 | 过滤文件大小，默认 `128K` |
+| `offset` | 否 | 评论的偏移 ID（用于分页）|
+| `page` | 否 | 页码，默认 `1` |
+| `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件）|
 | `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
+
+**响应示例**:
+```json
+{
+  "more": true,
+  "items": [
+    {
+      "id": "commentChannel",
+      "channel": "Comment Channel Name",
+      "item": [
+        {
+          "ext": ".mp4",
+          "src": "Comment title",
+          "name": "example.mp4",
+          "mid": 100,
+          "cid": -1001234567890,
+          "gid": 0,
+          "size": 104857600
+        }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
@@ -741,7 +795,7 @@ hash_val = hashlib.md5(f"{uid}{password}".encode()).hexdigest()[:6]
 ### Bot (机器人)
 
 - **官方支持**: Telegram 官方提供，通过 @BotFather 创建和管理
-- **API 限制**: 功能受 Telegram Bot API 限制，用于与用户交互、发送消息、管理群组等
+- **API 限制**: 功能受 TeleBot API 限制，用于与用户交互、发送消息、管理群组等
 - **安全性**: Bot 账户相对安全，无法像普通用户一样登录客户端，也无法访问用户的私人聊天记录
 - **使用场景**: 公开服务、自动化任务、信息推送等
 

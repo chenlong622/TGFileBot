@@ -763,8 +763,9 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 
 	if TCPDead {
 		go func() {
-			infos.tcpStat("user").fail(infos.UserClient.Load())
-			if infos.tcpStat("user").TCPDead.Load() {
+			status := infos.tcpStat("user")
+			status.fail(infos.UserClient.Load())
+			if status.TCPDead.Load() {
 				if err := infos.wakeTCP(infos.UserClient.Load(), "user"); err != nil {
 					log.Printf("TCP 重连失败: %+v", err)
 				} else if infos.Conf.Load().DeBUG {

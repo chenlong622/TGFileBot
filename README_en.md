@@ -2,7 +2,7 @@
 
 [English](README_en.md) | [中文](README.md)
 
-TGFileBot is an open-source project that deeply integrates a Telegram Bot and a UserBot, designed to provide high-performance direct link extraction for files, media chunk streaming, and comprehensive remote bot management features.
+TGFileBot is an open-source project that deeply integrates a TeleBot and a UserBot, designed to provide high-performance direct link extraction for files, media chunk streaming, and comprehensive remote bot management features.
 
 > ⚠️ **Important Note**: This project uses a modified version of the [gogram](https://github.com/lm317379829/gogram) library.
 
@@ -40,11 +40,13 @@ Create a `config.json` file in the program's running directory or the specified 
   "id": 123456789,
   "hash": "your_api_hash_here",
   "site": "https://example.com",
+  "proxy": "",
   "botToken": "123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefg",
   "userID": 987654321,
   "password": "your_optional_password",
   "dc": 0,
   "workers": 2,
+  "maxSize": 33554432,
   "channelID": 0,
   "adminIDs": [987654321],
   "whiteIDs": [987654321],
@@ -63,10 +65,12 @@ Create a `config.json` file in the program's running directory or the specified 
 | `hash` | String | Yes | - | Telegram API Hash (from my.telegram.org) |
 | `site` | String | Yes | - | Reverse proxy domain or server IP for generating direct links; must include http(s) protocol |
 | `botToken` | String | Yes | - | Bot Token (from @BotFather) |
+| `proxy` | String | No | Empty | Proxy server address (supports SOCKS, HTTP, MTProxy, TG protocols) for connecting to Telegram |
 | `userID` | Integer | Yes | - | Main administrator's Telegram User ID (account corresponding to the UserBot) |
 | `password` | String | No | Empty | API access password (if set, all API calls require authentication) |
 | `dc` | Integer | No | 0 | Telegram Data Center ID (1-5, 0 means auto-select; can be specified if connection issues arise) |
 | `workers` | Integer | No | 1 | Number of concurrent download coroutines (1-4 recommended; too high may trigger rate limits) |
+| `maxSize` | Integer | No | 32MB | Maximum cache size (bytes); also constrains the upper limit for head/tail chunk cache allocation |
 | `channelID` | Integer | No | 0 | Bound default Channel ID (`cid` parameter can be omitted in API) |
 | `adminIDs` | Array | No | [] | List of secondary administrator IDs (has most permissions, excluding login permission) |
 | `whiteIDs` | Array | No | [] | List of whitelist IDs (can only use basic features) |
@@ -85,7 +89,7 @@ go run main.go [options]
 | Argument | Description |
 |------|------|
 | `-files <path>` | Specifies the directory for configuration files, session files, and cache (defaults to `files`) |
-| `-log <path>` | Specifies the log file path (defaults to `files/log.log`; empty string means no file logging) |
+| `-log <path>` | Specifies the log file path (defaults to an empty string, meaning no file logging; when set, logs are written to both console and file) |
 | `-version`, `-v` | Prints the program version number and exits |
 
 ### 5. Running the Project
@@ -170,7 +174,7 @@ Send the following commands to the Bot via Telegram for management (commands wil
 | `/proxy <URL>` | Set proxy (supports SOCKS, HTTP, MTProxy, and TG protocols; `off` to disable) | Admin | `/proxy socks5://proxy.example.com:1080` |
 | `/dc <ID>` | Specify UserBot's data center (1-5) | Admin | `/dc 2` |
 | `/allow <ID>` | Add user ID to whitelist | Admin | `/allow 123456789` |
-| `/disallow <ID>` | Remove user ID from whitelist or delete by index | Admin | `/disallow 0` or `/disallow 123456789` |
+| `/disallow <ID>` | Remove user ID from whitelist or delete by index (`#N`) | Admin | `/disallow #0` or `/disallow 123456789` |
 | `/channel <ID>` | Dynamically set the bound default channel ID | Admin | `/channel 1001234567890` |
 | `/workers <1-4>` | Dynamically adjust concurrent download coroutines | Admin | `/workers 2` |
 | `/site <URL>` | Dynamically update the domain/proxy address for direct links | Admin | `/site https://newdomain.com` |
@@ -179,9 +183,9 @@ Send the following commands to the Bot via Telegram for management (commands wil
 | `/check <hash>` | View user info corresponding to hash | Admin | `/check a1b2c3` |
 | `/port <port>` | Dynamically set HTTP service port (takes effect after restart) | Admin | `/port 8081` |
 | `/add <alias>` | Add search channel alias (used for search function) | Admin | `/add @mychannel` or `/add mychannel` |
-| `/del <alias or index>` | Remove search channel alias | Admin | `/del 0` or `/del mychannel` |
+| `/del <alias or index>` | Remove search channel alias (`#N` by index, otherwise by alias) | Admin | `/del #0` or `/del mychannel` |
 | `/addrule <regex>` | Add regex filter rule (used to filter group messages) | Admin | `/addrule .*spam.*` |
-| `/delrule <index or content>` | Remove regex filter rule | Admin | `/delrule 0` or `/delrule .*spam.*` |
+| `/delrule <index or content>` | Remove regex filter rule (`#N` by index, otherwise by content) | Admin | `/delrule #0` or `/delrule .*spam.*` |
 | `/list <category>` | List configs of the specified category | Admin | `/list channels` or `/list ids` or `/list rules` |
 
 ### Getting Direct Links
@@ -208,7 +212,7 @@ Returns server running status, **no authentication required**.
 **Response Example**:
 ```json
 {
-  "版本": "v1.1.2",
+  "版本": "v1.1.4",
   "域名": "https://example.com",
   "端口": 8080,
   "缓存": "32 MB",
@@ -236,6 +240,7 @@ Core download interface, supports HTTP Range requests, enabling drag-and-play in
 | Parameter | Required | Description |
 |:---|:---:|:---|
 | `cid` | No | Channel ID (negative format, e.g., `-1001234567890`). Can be omitted if `channelID` is set in `config.json` |
+| `cname` | No | Channel username/alias (e.g., `@mychannel`); choose either this or `cid`, can resolve public or private channels |
 | `mid` | Yes | Message ID (positive integer) |
 | `cate` | No | Download client selection: `user` (uses UserBot, can access private channels) or `bot` (default). Automatically falls back to Bot if UserBot is not logged in |
 | `download` | No | Set to `true` to download as attachment (`Content-Disposition: attachment`), otherwise plays inline |
@@ -262,6 +267,7 @@ Gets the maximum size thumbnail of the specified Telegram media file (video, ima
 | Parameter | Required | Description |
 |:---|:---:|:---|
 | `cid` | No | Channel ID (negative format, e.g., `-1001234567890`). Can be omitted if `channelID` is set in `config.json` |
+| `cname` | No | Channel username/alias (e.g., `@mychannel`); either this or `cid` (choose one) |
 | `mid` | Yes | Message ID (positive integer) |
 | `cate` | No | Download client selection: `user` (uses UserBot) or `bot` (default) |
 | `key` / `hash` / `uid` | No* | Authentication parameters (required if `password` is set) |
@@ -285,6 +291,8 @@ Parses Telegram message links into direct links; supports private and public cha
 | `key` | No* | Plaintext access password (mutually exclusive with hash) |
 | `hash` | No* | Hash authentication (mutually exclusive with key) |
 | `uid` | No* | Corresponding user ID when using `hash` |
+| `offset` | No | Comment offset ID (for pagination with comment links) |
+| `reverse` | No | Whether to sort returned results in reverse, default `false` |
 
 **Supported Link Formats**:
 - Private channel: `https://t.me/c/1234567890/100`
@@ -332,11 +340,11 @@ Gets the media list of a specified channel. UserBot must be logged in.
 
 | Parameter | Required | Description |
 |:---|:---:|:---|
-| `cname` | Yes | Channel alias/username (e.g., `@channelname` or `channelname`) |
+| `cname` | Yes | Channel alias/username (e.g., `@channelname` or `channelname`); multiple comma-separated channels can be passed to return several lists at once |
 | `page` | No | Page number, default `1` |
 | `offset` | No | Result offset ID for pagination, default `0` |
 | `limit` | No | Return quantity per page, default `20`, max `100` |
-| `filter` | No | Filter file size, e.g., `10M`, only returns files larger than this size, default `128K` |
+| `filter` | No | Filter file size, e.g., `10M`, only returns files larger than this size, default `128K` (only applies to video files; can pass multiple comma-separated values for multiple `cname`, one per channel) |
 | `reverse` | No | Whether to sort in reverse, default `false` |
 | `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
 
@@ -383,7 +391,7 @@ Concurrent full-text retrieval in configured search channels. UserBot must be lo
 | `page` | No | Page number, default `1` |
 | `limit` | No | Return quantity per page, default `20`, max `100` |
 | `offset` | No | Result offset ID for pagination, default `0` |
-| `filter` | No | Filter file size, default `128K` |
+| `filter` | No | Filter file size, default `128K` (only applies to video files; can pass multiple comma-separated values for multiple channels, one per channel) |
 | `reverse` | No | Whether to sort in reverse, default `false` |
 | `cname` | No | Specify search channel aliases (comma-separated). If not specified, searches all configured channels |
 | `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
@@ -429,8 +437,29 @@ Used to obtain all files in a media group (multi-image/multi-video message) at o
 |:---|:---:|:---|
 | `cid` or `cname` | Yes | Channel ID or username (choose one) |
 | `mid` | Yes | Message ID |
-| `filter` | No | Filter file size, default `128K` |
+| `filter` | No | Filter file size, default `128K` (only applies to video files) |
 | `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+
+**Response Example**:
+```json
+{
+  "more": false,
+  "id": "mychannel",
+  "channel": "My Channel Name",
+  "item": [
+    {
+      "ext": ".mp4",
+      "src": "Video Title",
+      "name": "example.mp4",
+      "mid": 100,
+      "cid": -1001234567890,
+      "gid": 123456,
+      "size": 104857600,
+      "date": 1672531200
+    }
+  ]
+}
+```
 
 ---
 
@@ -440,16 +469,41 @@ Extracts media files from a message's comment area.
 
 **URL Format**:
 ```
-/comments?cid={channel_ID}&cname={channel_username}&mid={message_ID}&offset={offset_id}&filter={size_filter}&key={key}
+/comments?cid={channel_ID}&cname={channel_username}&mid={message_ID}&offset={offset_id}&page={page}&filter={size_filter}&key={key}
 ```
 
 | Parameter | Required | Description |
 |:---|:---:|:---|
 | `cid` or `cname` | Yes | Channel ID or username (choose one) |
 | `mid` | Yes | Message ID |
-| `offset` | Yes | Comment offset ID (for pagination) |
-| `filter` | No | Filter file size, default `128K` |
+| `offset` | No | Comment offset ID (for pagination) |
+| `page` | No | Page number, default `1` |
+| `filter` | No | Filter file size, default `128K` (only applies to video files) |
 | `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+
+**Response Example**:
+```json
+{
+  "more": true,
+  "items": [
+    {
+      "id": "commentChannel",
+      "channel": "Comment Channel Name",
+      "item": [
+        {
+          "ext": ".mp4",
+          "src": "Comment title",
+          "name": "example.mp4",
+          "mid": 100,
+          "cid": -1001234567890,
+          "gid": 0,
+          "size": 104857600
+        }
+      ]
+    }
+  ]
+}
+```
 
 ---
 
@@ -741,7 +795,7 @@ Due to Telegram's security policies, when submitting the `/code` verification co
 ### Bot
 
 - **Official Support**: Provided officially by Telegram, created and managed via @BotFather.
-- **API Limits**: Functionality is limited by the Telegram Bot API, used for interacting with users, sending messages, managing groups, etc.
+- **API Limits**: Functionality is limited by the TeleBot API, used for interacting with users, sending messages, managing groups, etc.
 - **Security**: Bot accounts are relatively secure; they cannot log into the client like normal users, nor can they access users' private chat history.
 - **Use Cases**: Public services, automated tasks, information pushing, etc.
 
