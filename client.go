@@ -617,17 +617,22 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 }
 
 // parseFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
-func (infos *Infos) parseFloodWait(errText string) (wait int, matched bool) {
+func (infos *Infos) parseFloodWait(errSrc string) (wait int, matched bool) {
 	wait = 3
-	matches := infos.Rex.FindStringSubmatch(errText)
-	matched = len(matches) > 0
-	for _, match := range matches[1:] {
-		if match != "" {
-			if value, err := strconv.Atoi(match); err == nil {
-				wait = value
-				break
+	errSrc = strings.ToUpper(errSrc)
+	matches := infos.Rex.FindStringSubmatch(errSrc)
+	matched = len(matches) > 1
+	if matched {
+		for _, match := range matches[1:] {
+			if match != "" {
+				if value, err := strconv.Atoi(match); err == nil {
+					wait = value
+					break
+				}
 			}
 		}
+	} else {
+		log.Printf("错误信息不是 FLOOD_WAIT: %s", errSrc)
 	}
 	return wait, matched
 }
