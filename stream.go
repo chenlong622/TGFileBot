@@ -222,15 +222,34 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					close(task.Content)
 					return
 				case errors.Is(err, telegram.ErrWorkerTCPDead):
-					// 立即标记主客户端 TCP 状态为失败, 使并发请求能及时感知断连
-					status := infos.tcpStat(stream.Cate)
-					if status.TCPDead.CompareAndSwap(false, true) {
-						status.fail(nil)
-						log.Printf("检测到 TCP 链路断开, 等待主客户端重连: cid=%d, mid=%d, name=%s", stream.CID, stream.MID, stream.FileName)
+					// 该协程专属连接池的连接已断开：销毁当前池, 强制下一次循环重建新连接后重试。
+					// 下载连接与主客户端相互隔离, 不需要也不应该唤醒/重建主连接。
+					if pool := stream.Pools[numTask-1]; pool != nil {
+						pool.Close()
+						stream.Pools[numTask-1] = nil
 					}
-					task.Error = err
-					close(task.Content)
-					return
+					if num == maxCount {
+						task.Error = err
+						close(task.Content)
+						return
+					}
+					backoffMs := 500 * num
+					if backoffMs > 3000 {
+						backoffMs = 3000
+					}
+					backoff := time.Duration(backoffMs) * time.Millisecond
+					log.Printf("协程%d: TCP连接断开 %d/%d, 等待 %.2f 秒后重试", numTask, num, maxCount, backoff.Seconds())
+					timer := time.NewTimer(backoff)
+					select {
+					case <-stream.Ctx.Done():
+						timer.Stop() // 取消时显式停止并释放定时器资源
+						task.Error = errors.New("已取消下载任务")
+						close(task.Content)
+						return
+					case <-timer.C:
+						// 等待时间结束，定时器自然释放
+						continue
+					}
 				case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
 					// 如果报错文件引用过期, 则调用 refresh 重新获取消息并更新引用
 					if infos.Conf.Load().DeBUG {

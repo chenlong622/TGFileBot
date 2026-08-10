@@ -335,14 +335,8 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 				}
 				buf.Reset()
 			case errors.Is(err, telegram.ErrWorkerTCPDead):
-				go func() {
-					stat.fail(nil)
-					if err := infos.wakeTCP(client, params.Cate); err != nil {
-						log.Printf("TCP 重连失败: %+v", err)
-					} else if infos.Conf.Load().DeBUG {
-						log.Print("TCP 重连成功")
-					}
-				}()
+				// 下载连接与主客户端隔离, 池内连接会自行重建, 无需唤醒主连接
+				http.Error(w, "下载失败, 连接已断开", http.StatusInternalServerError)
 				return
 			default:
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -589,15 +583,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 					buf.Reset()
 				case errors.Is(err, telegram.ErrWorkerTCPDead):
-					go func() {
-						status := infos.tcpStat(cate)
-						status.fail(nil)
-						if err := infos.wakeTCP(client, cate); err != nil {
-							log.Printf("TCP 重连失败: %+v", err)
-						} else if infos.Conf.Load().DeBUG {
-							log.Print("TCP 重连成功")
-						}
-					}()
+					// 下载连接与主客户端隔离, 池内连接会自行重建, 无需唤醒主连接
+					http.Error(w, "下载失败, 连接已断开", http.StatusInternalServerError)
 					return
 				default:
 					http.Error(w, err.Error(), http.StatusInternalServerError)

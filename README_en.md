@@ -396,8 +396,6 @@ Concurrent full-text retrieval in configured search channels. UserBot must be lo
 | `cname` | No | Specify search channel aliases (comma-separated). If not specified, searches all configured channels |
 | `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
 
-> ⏱️ The interface timeout is **30 seconds**. When searching multiple channels simultaneously, queries are performed concurrently.
-
 **Response Example**:
 ```json
 {
@@ -677,7 +675,7 @@ hash_val = hashlib.md5(f"{uid}{password}".encode()).hexdigest()[:6]
 
 **Symptom**: Returns a timeout when calling the `/search` interface.
 
-**Cause**: Searching multiple channels exceeds the 30-second timeout.
+**Cause**: Searching multiple channels exceeds the client request timeout.
 
 **Solution**:
 ```bash
