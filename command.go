@@ -15,7 +15,8 @@ import (
 
 // handleBotCommand 是 Bot 的总消息分发入口，处理所有管理指令
 func handleBotCommand(m *telegram.NewMessage) error {
-	if m.Sender.ID == infos.BotID {
+	// 频道广播消息（bot 为频道成员时收到）的 Sender 可能为 nil, 直接解引用会 panic
+	if m.Sender != nil && m.Sender.ID == infos.BotID {
 		return nil
 	}
 
@@ -77,8 +78,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil)
 			return nil
 		case strings.HasPrefix(text, "/allow"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			whiteID, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(text, "/allow")), 10, 64)
@@ -108,15 +108,20 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				value.IsWhite = true
 				infos.IDs[whiteID] = value
 				if hash := infos.calculateHash(whiteID); hash != "" {
-					infos.HashIndex[hash] = whiteID
+					// 6 位哈希存在碰撞可能: 若该哈希已被其他 UID 占用则跳过,
+					// 避免静默覆盖导致对方哈希不可用/冒用, 与 rebuildHashIndex 的碰撞策略保持一致
+					if owner, ok := infos.HashIndex[hash]; !ok || owner == whiteID {
+						infos.HashIndex[hash] = whiteID
+					} else {
+						log.Printf("哈希碰撞, 已跳过 %d 的反查索引 (哈希 %s 归属 %d)", whiteID, hash, owner)
+					}
 				}
 				infos.Mutex.Unlock()
 				sendMS(m, fmt.Sprintf("添加白名单成功: %d", whiteID), nil, 60)
 			}
 			return nil
 		case strings.HasPrefix(text, "/disallow"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/disallow"))
@@ -185,7 +190,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				} else {
 					delete(infos.IDs, whiteID)
 					if hash := infos.calculateHash(whiteID); hash != "" {
-						delete(infos.HashIndex, hash)
+						// 6 位哈希存在碰撞可能: 仅当该哈希当前归属此 UID 时删除,
+						// 避免连带删除与他碰撞的其他用户的白名单哈希反查条目
+						if owner, ok := infos.HashIndex[hash]; !ok || owner == whiteID {
+							delete(infos.HashIndex, hash)
+						} else {
+							log.Printf("哈希碰撞, 跳过 %d 的反查索引删除 (哈希 %s 归属 %d)", whiteID, hash, owner)
+						}
 					}
 				}
 			}
@@ -251,8 +262,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, "提交2FA密码成功", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/dc"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/dc"))
@@ -279,8 +289,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("DC已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/site"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/site"))
@@ -298,8 +307,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("反代地址已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/size"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/size"))
@@ -322,8 +330,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/proxy"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/proxy"))
@@ -349,8 +356,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("代理已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/password"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/password"))
@@ -368,8 +374,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("密码已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/channel"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/channel"))
@@ -391,8 +396,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("频道ID已设置为: %d", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/workers"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/workers"))
@@ -419,8 +423,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/check"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/check"))
@@ -447,8 +450,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/add") && !strings.HasPrefix(text, "/addrule"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			channel := strings.TrimSpace(strings.TrimPrefix(text, "/add"))
@@ -475,8 +477,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("添加频道成功: %s", channel), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/del") && !strings.HasPrefix(text, "/delrule"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/del"))
@@ -532,8 +533,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, successMsg, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/list"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/list"))
@@ -589,8 +589,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/port"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/port"))
@@ -613,8 +612,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("端口已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/info"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 
@@ -666,8 +664,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/addrule"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			rule := strings.TrimSpace(strings.TrimPrefix(text, "/addrule"))
@@ -698,8 +695,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, "添加正则规则成功", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/delrule"):
-			if !infos.isAdmin(m.SenderID()) {
-				sendMS(m, "你没有使用此命令的权限", nil, 60)
+			if !infos.requireAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/delrule"))

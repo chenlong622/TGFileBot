@@ -100,7 +100,6 @@ type MediaContent struct {
 	Start   int64
 	End     int64
 	Content []byte
-	Time    time.Time
 }
 
 type MediaCache struct {

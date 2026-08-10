@@ -16,8 +16,9 @@ import (
 	"github.com/amarnathcjd/gogram/telegram"
 )
 
-// streamPathRe 从 /stream/{mid}/{name} 形式的路径中提取消息 ID, handleParams 每次请求都会用到, 提升为包级变量避免重复编译
-var streamPathRe = regexp.MustCompile(`/stream/(\d+)/[a-zA-Z0-9]+`)
+// streamPathRe 从 /stream/{mid}/{name} 形式的路径中提取消息 ID, handleParams 每次请求都会用到, 提升为包级变量避免重复编译。
+// name 段只允许路径分隔符 / 以外的任意字符（含 . _ % 空格 中文等), 原有 [a-zA-Z0-9]+ 会拒绝含这些字符的文件名
+var streamPathRe = regexp.MustCompile(`/stream/(\d+)/[^/]+`)
 
 // handleMain 是 HTTP 服务的主分发函数, 根据路径路由到不同的处理器
 func handleMain(w http.ResponseWriter, r *http.Request) {
@@ -312,54 +313,13 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 	log.Printf("正在处理来自 %s 的请求, 开始下载封面, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, src.File.Name)
 
 	buf := new(bytes.Buffer)
-	maxCount := 2
-	success := false
-	for count := 1; count <= maxCount; count++ {
-		version := msCache.Version.Load()
-		_, err = client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
-			ThumbOnly: true,
-			ThumbSize: actualThumb,
-			Buffer:    buf,
-			Ctx:       r.Context(),
-		})
-		if err != nil {
-			switch {
-			case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
-				if infos.Conf.Load().DeBUG {
-					log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
-				}
-				src, err = infos.refreshMs(client, version, param, msCache)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-				buf.Reset()
-			case errors.Is(err, telegram.ErrWorkerTCPDead):
-				// 下载连接与主客户端隔离, 池内连接会自行重建, 无需唤醒主连接
-				http.Error(w, "下载失败, 连接已断开", http.StatusInternalServerError)
-				return
-			default:
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				go func() {
-					stat.fail(client)
-					if stat.TCPDead.Load() {
-						if err := infos.wakeTCP(client, params.Cate); err != nil {
-							log.Printf("TCP 重连失败: %+v", err)
-						} else if infos.Conf.Load().DeBUG {
-							log.Print("TCP 重连成功")
-						}
-					}
-				}()
-				return
-			}
-		} else {
-			success = true
-			break
-		}
-	}
-
-	if !success {
-		http.Error(w, "下载封面失败: 文件引用持续过期", http.StatusInternalServerError)
+	// 下载→引用过期刷新→TCP 断开唤醒的公共重试逻辑, 与 handleStream 小文件分支共用
+	if !infos.downloadMediaRetry(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
+		ThumbOnly: true,
+		ThumbSize: actualThumb,
+		Buffer:    buf,
+		Ctx:       r.Context(),
+	}, "下载封面失败: 文件引用持续过期") {
 		return
 	}
 
@@ -369,6 +329,52 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 	if n, err := w.Write(buf.Bytes()); err != nil {
 		log.Printf("写入长度 %d 的响应体失败: %+v", n, err)
 	}
+}
+
+// downloadMediaRetry 下载媒体到 buf, 引用过期自动刷新引用重试、TCP 断开标记失败并异步唤醒主连接。
+// 成功返回 true; 失败时已将错误写入 HTTP 响应并返回 false。handlePic 与 handleStream 小文件分支共用。
+func (infos *Infos) downloadMediaRetry(w http.ResponseWriter, client *telegram.Client, cate string, src *telegram.NewMessage, param HandleMs, msCache *MsCache, buf *bytes.Buffer, opts *telegram.DownloadOptions, failMsg string) bool {
+	maxCount := 2
+	for count := 1; count <= maxCount; count++ {
+		version := msCache.Version.Load()
+		_, err := client.DownloadMedia(src.Media(), opts)
+		if err == nil {
+			return true
+		}
+		switch {
+		case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
+			if infos.Conf.Load().DeBUG {
+				log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", param.CID, param.MIDs[0], src.File.Name)
+			}
+			newSrc, err := infos.refreshMs(client, version, param, msCache)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return false
+			}
+			*src = newSrc
+			buf.Reset()
+		case errors.Is(err, telegram.ErrWorkerTCPDead):
+			// 下载连接与主客户端隔离, 池内连接会自行重建, 无需唤醒主连接
+			http.Error(w, "下载失败, 连接已断开", http.StatusInternalServerError)
+			return false
+		default:
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			stat := infos.tcpStat(cate)
+			go func() {
+				stat.fail(client)
+				if stat.TCPDead.Load() {
+					if err := infos.wakeTCP(client, cate); err != nil {
+						log.Printf("TCP 重连失败: %+v", err)
+					} else if infos.Conf.Load().DeBUG {
+						log.Print("TCP 重连成功")
+					}
+				}
+			}()
+			return false
+		}
+	}
+	http.Error(w, failMsg, http.StatusInternalServerError)
+	return false
 }
 
 // handleList 处理来自 HTTP 的文件列表请求
@@ -468,6 +474,18 @@ func handleLink(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// streamWaitTimeout 返回消费端等待单个分片时的超时上限。
+// 基础值必须覆盖单个分片的最坏下载耗时：冷启动连接握手 + 最多 6 次重试
+// （每次 8s 超时 + 3s 退避）≈ 66s；若存在全局 FloodWait, 还需叠加上剩余的
+// 等待时间, 否则分片仍在推进（等待/重试）时会被固定短定时器误判为超时截断响应。
+func streamWaitTimeout() time.Duration {
+	wait := 90 * time.Second
+	if remaining := time.Until(time.Unix(infos.WaitUntil.Load(), 0)); remaining > 0 {
+		wait += remaining
+	}
+	return wait
+}
+
 // handleStream 处理来自 HTTP 的文件流式读取请求
 // 该函数实现了 Range 分段下载支持, 允许像播放普通 mp4 文件一样拖动进度条
 func handleStream(w http.ResponseWriter, r *http.Request) {
@@ -525,6 +543,34 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "消息不是有效的媒体文件", http.StatusBadRequest)
 		return
 	}
+
+	// 转发消息统一解析到源消息：让 CID/MID、文件大小/名称与媒体引用全部指向源频道,
+	// 避免大文件分支（重定向源 post）与小文件分支（直接下载转发）行为分叉,
+	// 也避免媒体缓存键（源 post）与 msCache 键（转发消息）互相错位
+	streamCID, streamMID := params.CID, params.MID
+	if src.Message.FwdFrom != nil {
+		if ch, ok := src.Message.FwdFrom.FromID.(*telegram.PeerChannel); ok && src.Message.FwdFrom.ChannelPost != 0 {
+			srcCache, err := infos.handleMs(HandleMs{
+				CID:   ch.ChannelID,
+				MIDs:  []int32{src.Message.FwdFrom.ChannelPost},
+				Ctx:   r.Context(),
+				Cate:  cate,
+				Limit: 1,
+			})
+			if err != nil {
+				if infos.Conf.Load().DeBUG {
+					log.Printf("解析转发源消息失败, 回退到转发消息: %+v", err)
+				}
+			} else if sm := srcCache.load(); len(sm) > 0 && sm[0].File != nil {
+				msCache = srcCache
+				ms = sm
+				src = sm[0]
+				cate = srcCache.Cate
+				client = infos.cateClient(cate)
+				streamCID, streamMID = ch.ChannelID, src.Message.FwdFrom.ChannelPost
+			}
+		}
+	}
 	size := src.File.Size
 	fileName := src.File.Name
 	chunkSize := 1 * 1024 * 1024
@@ -546,13 +592,15 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		ranHeader := r.Header.Get("Range")
 		start, end := handleRanHeader(ranHeader, size)
 
-		// HEAD 请求只需要头部信息, 文件大小已从消息元数据中获知, 无需真的向 Telegram 发起下载
+		// HEAD 请求只需要头部信息, 文件大小已从消息元数据中获知, 无需真的向 Telegram 发起下载。
+		// 带 Range 时须返回 206, 与下方大文件分支保持一致, 否则断点续传/seek 探测会误判
 		if r.Method == http.MethodHead {
 			if ranHeader == "" {
 				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 			} else {
 				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 				w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+				w.WriteHeader(http.StatusPartialContent)
 			}
 			return
 		}
@@ -560,54 +608,12 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		clientIP := GetClientIP(r)
 		log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, fileName)
 		buf := new(bytes.Buffer)
-		maxCount := 2
-		success := false
-		for count := 1; count <= maxCount; count++ {
-			version := msCache.Version.Load()
-			_, err = client.DownloadMedia(src.Media(), &telegram.DownloadOptions{
-				Buffer:    buf,
-				ChunkSize: int32(chunkSize),
-				Threads:   workers,
-				Ctx:       r.Context(),
-			})
-			if err != nil {
-				switch {
-				case telegram.MatchError(err, "FILE_REFERENCE_EXPIRED"):
-					if infos.Conf.Load().DeBUG {
-						log.Printf("引用过期, 正在尝试刷新文件引用, cid=%d, mid=%d, name=%s", params.CID, params.MID, src.File.Name)
-					}
-					src, err = infos.refreshMs(client, version, param, msCache)
-					if err != nil {
-						http.Error(w, err.Error(), http.StatusInternalServerError)
-						return
-					}
-					buf.Reset()
-				case errors.Is(err, telegram.ErrWorkerTCPDead):
-					// 下载连接与主客户端隔离, 池内连接会自行重建, 无需唤醒主连接
-					http.Error(w, "下载失败, 连接已断开", http.StatusInternalServerError)
-					return
-				default:
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					go func() {
-						status := infos.tcpStat(cate)
-						status.fail(client)
-						if status.TCPDead.Load() {
-							if err := infos.wakeTCP(client, cate); err != nil {
-								log.Printf("TCP 重连失败: %+v", err)
-							} else if infos.Conf.Load().DeBUG {
-								log.Print("TCP 重连成功")
-							}
-						}
-					}()
-					return
-				}
-			} else {
-				success = true
-				break
-			}
-		}
-		if !success {
-			http.Error(w, "下载失败: 文件引用持续过期", http.StatusInternalServerError)
+		if !infos.downloadMediaRetry(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
+			Buffer:    buf,
+			ChunkSize: int32(chunkSize),
+			Threads:   workers,
+			Ctx:       r.Context(),
+		}, "下载失败: 文件引用持续过期") {
 			return
 		}
 		infos.tcpStat(cate).touch()
@@ -616,8 +622,17 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		if ranHeader == "" {
 			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 		} else {
-			// 下载到的内容以实际大小为准做边界保护, 防止 Telegram 返回的字节数与消息元数据里的 size 有出入导致越界
+			// 下载到的内容以实际大小为准做边界保护, 防止 Telegram 返回的字节数与消息元数据里的 size 有出入导致越界。
+			// 实际内容为空时按 RFC 返回 416, 避免负下标/越界切片导致 panic 或响应退化
+			if len(content) == 0 {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+				http.Error(w, "请求范围不合法", http.StatusRequestedRangeNotSatisfiable)
+				return
+			}
 			rangeStart, rangeEnd := start, end
+			if rangeStart < 0 {
+				rangeStart = 0
+			}
 			if rangeEnd >= int64(len(content)) {
 				rangeEnd = int64(len(content)) - 1
 			}
@@ -634,16 +649,8 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		// 创建新的 Stream 流管理对象
-		stream := newStream(r.Context(), client, src.Media(), workers, params.MID, params.CID, src.File.Size, fileName, cate)
+		stream := newStream(r.Context(), client, src.Media(), workers, streamMID, streamCID, src.File.Size, fileName, cate)
 		stream.Ms = ms
-
-		// 如果是转发的消息, 重定向源频道以确保分片下载稳定性
-		if src.Message.FwdFrom != nil {
-			if ch, ok := src.Message.FwdFrom.FromID.(*telegram.PeerChannel); ok {
-				stream.CID = ch.ChannelID
-				stream.MID = src.Message.FwdFrom.ChannelPost
-			}
-		}
 
 		// 6. 设置 HTTP 响应头
 		w.Header().Set("Accept-Ranges", "bytes") // 启用 Range 支持
@@ -723,7 +730,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		// 10. 循环从下载管道读取分片并写入 HTTP 响应体
 		if r.Method == http.MethodGet {
 			// 首个分片给更长超时，容忍冷启动 Telegram 连接重建延迟
-			timer := time.NewTimer(60 * time.Second)
+			timer := time.NewTimer(streamWaitTimeout())
 			defer timer.Stop()
 			for {
 				select {
@@ -734,17 +741,15 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 					return
 				case task := <-stream.Tasks:
-					// 读取一个下载好的分片任务
-					if task == nil {
-						log.Printf("流式传输文件出错: cid=%d, mid=%d, name=%s, error=任务为空", params.CID, params.MID, fileName)
-						continue
-					}
-
+					// 读取一个下载好的分片任务; stream.Tasks 从不 close()/发送 nil, 无需判空
 					if task.Error != nil {
 						log.Printf("切片下载出错: cid=%d, mid=%d, start=%d, end=%d, name=%s, error=%+v", params.CID, params.MID, task.ContentStart, task.ContentEnd, fileName, task.Error)
 						return
 					}
-					// 等待任务完成或者客户端断开
+					// 等待任务完成或者客户端断开。
+					// 弹出任务后立刻用自适应超时重新计时：等待区间须覆盖该分片完整的
+					// 下载耗时（含重试与 FloodWait）, 否则分片仍在推进时会被误判为超时截断响应
+					timer.Reset(streamWaitTimeout())
 					select {
 					case <-r.Context().Done():
 						if infos.Conf.Load().DeBUG {
@@ -786,7 +791,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						}
 						task = nil
 						content = nil
-						timer.Reset(30 * time.Second)
+						timer.Reset(streamWaitTimeout())
 					}
 				case <-timer.C:
 					log.Printf("流式传输文件超时: cid=%d, mid=%d, name=%s", params.CID, params.MID, fileName)
@@ -956,11 +961,19 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 			}()
 
 			filter := int64(0)
-			if num < lenFilters {
+			// 过滤器为单值时对全部频道生效, 多值时按位置与频道一一对应
+			if lenFilters == 1 {
+				filter = params.Filters[0]
+			} else if num < lenFilters {
 				filter = params.Filters[num]
 			}
-			keywords := words[0]
-			if num < lenWords {
+
+			keywords := ""
+			// 关键词为单值时作用到所有频道（常见用法: 一个词搜全部频道）;
+			// 多值时按位置一一对应; 频道数超出关键词数时, 超出频道无关键词, 走下方跳过逻辑
+			if lenWords == 1 {
+				keywords = words[0]
+			} else if num < lenWords {
 				keywords = words[num]
 			}
 
@@ -1249,6 +1262,11 @@ func hackLinks(res HackLink) (items []Item, errs error) {
 	if errs != nil && res.M != nil {
 		if _, err := res.M.Reply(errs.Error()); err != nil {
 			log.Printf("发送消息失败: %+v", err)
+		}
+		// 部分匹配成功时, 错误已单独告知, 已解析出的链接必须保留并交由调用方继续下发,
+		// 不能因为存在个别失败就把全部成功结果一并丢弃
+		if len(items) > 0 {
+			return items, nil
 		}
 		return nil, errs
 	}

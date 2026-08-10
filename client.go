@@ -428,27 +428,32 @@ func (infos *Infos) resetStatus() {
 	infos.Status.Store(0)
 }
 
-// code 是登录回调, 暂停协程等待用户通过 Bot 发送验证码
-func (infos *Infos) code() (code string, err error) {
-	// 使用CompareAndSwap原子操作确保只有一个goroutine能进入
-	if !infos.Status.CompareAndSwap(0, 1) {
-		err = errors.New("当前状态不是等待验证码")
+// waitInput 是登录流程的通用等待器: CAS 原子转移状态成功后, 通过 Bot 提示用户输入,
+// 再在通道与超时之间二选一等待结果, 超时自动重置为未登录状态并返回错误
+func (infos *Infos) waitInput(from, to int32, input chan string, stateName, waitMsg, timeoutMsg string) (string, error) {
+	if !infos.Status.CompareAndSwap(from, to) {
+		err := fmt.Errorf("当前状态不是等待%s", stateName)
 		sendMS(nil, err.Error(), nil, 60)
 		return "", err
 	}
 	timeout := time.NewTimer(2 * time.Minute)
 	defer timeout.Stop()
 
-	sendMS(nil, "等待用户输入 /code 验证码...", nil, 120)
+	sendMS(nil, waitMsg, nil, 120)
 	select {
-	case code := <-infos.Code:
-		return code, nil
+	case str := <-input:
+		return str, nil
 	case <-timeout.C:
-		infos.Status.Store(0)
-		err = errors.New("等待验证码超时")
+		err := errors.New(timeoutMsg)
 		sendMS(nil, err.Error(), nil, 60)
+		infos.Status.Store(0) // 流程失败, 重置为未登录状态
 		return "", err
 	}
+}
+
+// code 是登录回调, 暂停协程等待用户通过 Bot 发送验证码
+func (infos *Infos) code() (string, error) {
+	return infos.waitInput(0, 1, infos.Code, "验证码", "等待用户输入 /code 验证码...", "等待验证码超时")
 }
 
 // submitCode 接收用户通过 Bot 发送的验证码并写入通道
@@ -472,40 +477,21 @@ func (infos *Infos) submitCode(str string) (err error) {
 	code := sb.String()
 	infos.Mutex.Unlock() // 发送前解锁，允许阻塞但不会死锁全局
 
-	timeout := time.NewTimer(2 * time.Minute)
-	defer timeout.Stop()
-
+	// 非阻塞写入：缓冲容量为 1 且读取方 code() 是唯一消费者,
+	// 缓冲满即代表已有未消费的验证码（重复提交/读取方已超时）, 直接拒绝,
+	// 避免在无读取者的竞态下长时间占用 Bot 消息处理 goroutine,
+	// 也不再用超时分支无条件重置 Status 而误伤已成功的登录流程
 	select {
 	case infos.Code <- code:
 		return nil
-	case <-timeout.C:
-		err = errors.New("等待验证码超时")
-		infos.Status.Store(0) // 流程失败，重置为未登录状态
-		return err
+	default:
+		return errors.New("已有验证码等待处理, 请勿重复提交")
 	}
 }
 
 // pass 是登录回调, 暂停协程等待用户通过 Bot 发送 2FA 密码
-func (infos *Infos) pass() (pass string, err error) {
-	// 使用CompareAndSwap原子操作确保只有一个goroutine能进入
-	if !infos.Status.CompareAndSwap(1, 2) {
-		err = errors.New("当前状态不是等待2FA密码")
-		sendMS(nil, err.Error(), nil, 60)
-		return "", err
-	}
-	timeout := time.NewTimer(2 * time.Minute)
-	defer timeout.Stop()
-
-	sendMS(nil, "等待用户输入 /pass 2FA密码...", nil, 120)
-	select {
-	case pass := <-infos.Pass:
-		return pass, nil
-	case <-timeout.C:
-		err = errors.New("等待2FA密码超时")
-		sendMS(nil, err.Error(), nil, 60)
-		infos.Status.Store(0) // 流程失败，重置为未登录状态
-		return "", err
-	}
+func (infos *Infos) pass() (string, error) {
+	return infos.waitInput(1, 2, infos.Pass, "2FA密码", "等待用户输入 /pass 2FA密码...", "等待2FA密码超时")
 }
 
 // submitPass 接收用户通过 Bot 发送的 2FA 密码并写入通道
@@ -519,16 +505,15 @@ func (infos *Infos) submitPass(pass string) (err error) {
 	}
 	infos.Mutex.Unlock() // 发送前解锁，允许阻塞但不会死锁全局
 
-	timeout := time.NewTimer(2 * time.Minute)
-	defer timeout.Stop()
-
+	// 非阻塞写入：缓冲容量为 1 且读取方 pass() 是唯一消费者,
+	// 缓冲满即代表已有未消费的密码（重复提交/读取方已超时）, 直接拒绝,
+	// 避免在无读取者的竞态下长时间占用 Bot 消息处理 goroutine,
+	// 也不再用超时分支无条件重置 Status 而误伤已成功的登录流程
 	select {
 	case infos.Pass <- pass:
 		return nil
-	case <-timeout.C:
-		err = errors.New("等待2FA密码超时")
-		infos.Status.Store(0) // 流程失败，重置为未登录状态
-		return err
+	default:
+		return errors.New("已有2FA密码等待处理, 请勿重复提交")
 	}
 }
 
@@ -606,29 +591,18 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 			AppVersion:    "10.14.3",
 		},
 		FloodHandler: func(ctx context.Context, err error) bool {
-			wait := 3
-			matches := infos.Rex.FindStringSubmatch(err.Error())
-			if len(matches) > 1 {
-				for _, match := range matches {
-					if value, err := strconv.Atoi(match); err == nil {
-						wait = value
-						break
-					}
-				}
-			}
+			wait, _ := infos.parseFloodWait(err.Error())
 			log.Printf("访问太过频繁, 等待 %d 秒后重试", wait+1)
-			waitSec := time.Duration(wait+1) * time.Second
-			waitUntil := time.Now().Add(waitSec)
-			infos.WaitUntil.Store(waitUntil.Unix())
+			infos.advanceWaitUntil(wait)
 
-			timer := time.NewTimer(waitSec)
+			timer := time.NewTimer(time.Duration(wait+1) * time.Second)
+			defer timer.Stop()
 			select {
 			case <-ctx.Done():
-				timer.Stop()
+				return false
 			case <-timer.C:
+				return true
 			}
-
-			return true
 		},
 	}
 	if appConf.Proxy != "" {
@@ -642,6 +616,30 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 	return conf
 }
 
+// parseFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
+func (infos *Infos) parseFloodWait(errText string) (wait int, matched bool) {
+	wait = 3
+	matches := infos.Rex.FindStringSubmatch(errText)
+	matched = len(matches) > 0
+	for _, match := range matches[1:] {
+		if match != "" {
+			if value, err := strconv.Atoi(match); err == nil {
+				wait = value
+				break
+			}
+		}
+	}
+	return wait, matched
+}
+
+// advanceWaitUntil 只增不减地推进全局 FloodWait 截止时间, 避免后续短等待覆盖仍在生效的长等待
+func (infos *Infos) advanceWaitUntil(wait int) {
+	waitUntil := time.Now().Add(time.Duration(wait+1) * time.Second)
+	if currentWait := infos.WaitUntil.Load(); waitUntil.Unix() > currentWait {
+		infos.WaitUntil.Store(waitUntil.Unix())
+	}
+}
+
 // list
 func (infos *Infos) list(channel string, page, limit int, offset int32, filter int64, reverse bool, ctx context.Context) (items Items, err error) {
 	channelInfo, err := infos.handleChannel(channel)
@@ -652,10 +650,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 		handleOffset("del", channel, 0)
 	} else {
 		offset = handleOffset("get", fmt.Sprintf("%s|%d", channel, page), 0)
-	}
-
-	if page > 1 && offset == 0 {
-		return items, errors.New("未找到匹配消息")
+		// 偏移量缓存过期（>1h）时 offset 回退为 0, 则从第 1 页重新开始, 不再报错
 	}
 
 	params := HandleMs{
@@ -787,9 +782,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 	if offset == 0 {
 		key := fmt.Sprintf("%s|%s|%d", channel, keywords, page)
 		offset = handleOffset("get", key, offset)
-		if page > 1 && offset == 0 {
-			return items, errors.New("未找到匹配消息")
-		}
+		// 偏移量缓存过期（>1h）时 offset 回退为 0, 则从第 1 页重新开始, 不再报错
 	}
 
 	params := HandleMs{
@@ -837,6 +830,10 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 	sortItems(items.Item, reverse)
 	return items, nil
 }
+
+// listFreshTTL 是首页列表/搜索结果的短 TTL, 保证新发布的文件能及时出现在首页,
+// 同时避免每次请求都实时打 Telegram 造成的 FLOOD_WAIT 压力
+const listFreshTTL = 30 * time.Second
 
 // handleMs 根据当前网络延迟选择最佳客户端
 func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
@@ -934,6 +931,11 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 		params.Limit = lenMIDs
 	}
 
+	// 首页列表/搜索请求（无消息 ID、无翻页游标）属于"新鲜数据"类请求,
+	// 缓存命中需接受较短的 TTL, 使新发布的文件能及时在首页出现;
+	// 锚点类请求（带 MIDs/OffsetID）则保持长期命中以稳定翻页
+	freshReq := lenMIDs == 0 && params.OffsetID == 0
+
 	// 不同 Limit 的请求不能共用同一份缓存, 否则会返回条数与请求不符的结果（见 kname 说明）
 	kname += ":limit=" + strconv.Itoa(params.Limit)
 
@@ -946,9 +948,17 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	hit := false
 	if ok {
 		infos.Mutex.Lock()
-		if result.Mes != nil && len(result.Mes) >= params.Limit {
-			hit = true
-			result.Time = time.Now()
+		if len(result.Mes) > 0 {
+			if freshReq {
+				// 首页请求只接受短 TTL 内的结果, 过期即重新拉取, 保证新内容及时可见
+				if time.Since(result.Time) < listFreshTTL {
+					hit = true
+					result.Time = time.Now()
+				}
+			} else if len(result.Mes) >= params.Limit {
+				hit = true
+				result.Time = time.Now()
+			}
 		}
 		infos.Mutex.Unlock()
 	}
@@ -973,7 +983,7 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 				stat.fail(client)
 				if err := infos.wakeTCP(client, params.Cate); err != nil {
 					log.Printf("TCP 重连失败: %+v", err)
-				} else if infos.Conf.Load().DeBUG {
+				} else if debug {
 					log.Print("TCP 重连成功")
 				}
 			}()
@@ -988,7 +998,16 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 			return result, err
 		}
 		result = &MsCache{Mes: ms, Time: time.Now(), Cate: params.Cate, Username: channelInfo.Username}
-		if len(ms) == params.Limit && (lenMIDs > 0 || params.OffsetID > 0) {
+		if freshReq {
+			// 首页列表/搜索: 缓存一切非空结果（含不足一页的末尾页), 结合短 TTL 命中
+			if len(ms) > 0 {
+				infos.Mutex.Lock()
+				evictOldestMsCache(infos.MsCache, infos.MaxMs)
+				infos.MsCache[kname] = result
+				infos.Mutex.Unlock()
+			}
+		} else if len(ms) == params.Limit {
+			// 锚点请求（带 MIDs/OffsetID）仅在取满一页时缓存, 语义与修改前保持一致
 			infos.Mutex.Lock()
 			evictOldestMsCache(infos.MsCache, infos.MaxMs)
 			infos.MsCache[kname] = result
@@ -1003,23 +1022,25 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 // client 由调用方显式传入（而非读取共享的 infos.Client），避免并发请求下客户端选择互相覆盖
 func (infos *Infos) refreshMs(client *telegram.Client, version int64, params HandleMs, msCache *MsCache) (src telegram.NewMessage, err error) {
 	debug := infos.Conf.Load().DeBUG
-	infos.Mutex.Lock()
-	defer infos.Mutex.Unlock()
 
+	// 快速路径：版本已变化, 说明其它协程已完成刷新, 直接复用其结果
+	infos.Mutex.RLock()
 	if version != msCache.Version.Load() {
 		if len(msCache.Mes) > 0 {
 			src = msCache.Mes[0]
+			infos.Mutex.RUnlock()
 			if debug {
 				log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mids=%v, name=%s, version=%d, newVersion=%d", params.CID, params.MIDs, src.File.Name, version, msCache.Version.Load())
 			}
 			return src, nil
-		} else {
-			log.Printf("文件引用已刷新, 但未获取到消息, cid=%d, mids=%v, version=%d, newVersion=%d", params.CID, params.MIDs, version, msCache.Version.Load())
-			return src, errors.New("未获取到消息")
 		}
+		infos.Mutex.RUnlock()
+		log.Printf("文件引用已刷新, 但未获取到消息, cid=%d, mids=%v, version=%d, newVersion=%d", params.CID, params.MIDs, version, msCache.Version.Load())
+		return src, errors.New("未获取到消息")
 	}
+	infos.Mutex.RUnlock()
 
-	// 重新获取消息
+	// 网络 IO 不持有全局锁, 避免阻塞其它所有依赖 infos.Mutex 的操作
 	ms, err := client.GetMessages(params.CID, &telegram.SearchOption{
 		IDs:     params.MIDs,
 		Context: params.Ctx,
@@ -1049,6 +1070,19 @@ func (infos *Infos) refreshMs(client *telegram.Client, version int64, params Han
 		err = errors.New("消息不包含媒体")
 		log.Printf("消息不包含媒体: cid=%v, mids=%v", params.CID, params.MIDs)
 		return src, err
+	}
+
+	// 回写前再次校验版本：拉取期间其它协程可能已完成刷新/回写, 此时应丢弃本次结果, 采用更新版本
+	infos.Mutex.Lock()
+	defer infos.Mutex.Unlock()
+	if version != msCache.Version.Load() {
+		if len(msCache.Mes) > 0 {
+			src = msCache.Mes[0]
+			if debug {
+				log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mids=%v, name=%s, version=%d, newVersion=%d", params.CID, params.MIDs, src.File.Name, version, msCache.Version.Load())
+			}
+		}
+		return src, nil
 	}
 	msCache.Mes = ms
 	msCache.Time = time.Now()

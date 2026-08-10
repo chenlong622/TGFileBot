@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,7 +17,6 @@ import (
 type Task struct {
 	ContentStart int64       // 任务请求的数据起点（绝对位置）
 	ContentEnd   int64       // 任务请求的数据终点（绝对位置）
-	Version      int64       // 任务对应的文件版本号, 用于处理引用过期
 	Error        error       // 下载过程中产生的错误
 	Done         bool        // 是否已成功
 	Content      chan []byte // 下载到的二进制内容
@@ -39,7 +37,6 @@ type Stream struct {
 	TaskEnd      *int64                 // 当前已分配任务的下载终点
 	FileName     string                 // 文件名
 	Error        error                  // 整个流运行过程中的错误
-	Count        atomic.Int64           // 当前正在运行的协程数量
 	Version      atomic.Int64           // 文件版本号, 因引用过期刷新后递增
 	Init         atomic.Bool            // 是否已经初始化
 	Cate         string                 // 客户端类别 ("user"/"bot"), 用于标记主客户端 TCP 状态
@@ -105,9 +102,7 @@ func (stream *Stream) start(contentStart, contentEnd int64) {
 	}
 
 	for numTask := 1; numTask <= maxTasks; numTask++ {
-		stream.Count.Add(1)
 		go func(numTask int) {
-			defer stream.Count.Add(-1)
 			stream.download(numTask, contentStart, contentEnd)
 		}(numTask)
 	}
@@ -130,7 +125,6 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 		chunkSize := stream.ChunkSize
 		if stream.Init.CompareAndSwap(false, true) {
 			maxWait = 4
-			chunkSize = 128 * 1024
 		}
 
 		stream.Mutex.Lock()
@@ -287,25 +281,11 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					}
 					continue
 				default:
-					if matches := infos.Rex.FindStringSubmatch(errStr); len(matches) > 0 {
-						wait := 3
-						if len(matches) > 1 {
-							for _, match := range matches[1:] {
-								if match != "" {
-									if value, e := strconv.Atoi(match); e == nil {
-										wait = value
-										break
-									}
-								}
-							}
-						}
+					if wait, flood := infos.parseFloodWait(errStr); flood {
 						if infos.Conf.Load().DeBUG {
 							log.Printf("协程%d: 访问太过频繁, 等待 %d 秒后重试", numTask, wait+1)
 						}
-						waitUntil := time.Now().Add(time.Duration(wait+1) * time.Second)
-						if currentWait := infos.WaitUntil.Load(); waitUntil.Unix() > currentWait {
-							infos.WaitUntil.Store(waitUntil.Unix())
-						}
+						infos.advanceWaitUntil(wait)
 						timer := time.NewTimer(time.Duration(wait+1) * time.Second)
 						select {
 						case <-stream.Ctx.Done():

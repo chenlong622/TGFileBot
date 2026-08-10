@@ -7,7 +7,10 @@ import (
 	"fmt"
 	"log"
 	handleUrl "net/url"
+	"sort"
 	"strconv"
+
+	"github.com/amarnathcjd/gogram/telegram"
 )
 
 // buildIDs 根据配置重建 IDs 以支持 O(1) 权限查询
@@ -16,38 +19,51 @@ func (infos *Infos) buildIDs() {
 
 	infos.Mutex.Lock()
 	defer infos.Mutex.Unlock()
-	// 检查UserID是否在IDs中
-	if value, ok := infos.IDs[conf.UserID]; !ok {
+
+	// 配置里列出的 ID 无论是否已存在于 IDs 中, 都应补齐配置规定的权限标志,
+	// 而非仅新增条目：防止已有条目（如会话中途标记过）缺失配置要求的管理员/白名单位
+	setAdminWhite := func(id int64) {
+		value := infos.IDs[id]
 		value.IsAdmin = true
 		value.IsWhite = true
-		infos.IDs[conf.UserID] = value
+		infos.IDs[id] = value
 	}
+	setWhite := func(id int64) {
+		value := infos.IDs[id]
+		value.IsWhite = true
+		infos.IDs[id] = value
+	}
+
+	setAdminWhite(conf.UserID)
 
 	// 检查AdminIDs是否在IDs中
 	for _, id := range conf.AdminIDs {
-		if value, ok := infos.IDs[id]; !ok {
-			value.IsAdmin = true
-			value.IsWhite = true
-			infos.IDs[id] = value
-		}
+		setAdminWhite(id)
 	}
 
 	// 检查WhiteIDs是否在IDs中
 	for _, id := range conf.WhiteIDs {
-		if value, ok := infos.IDs[id]; !ok {
-			value.IsWhite = true
-			infos.IDs[id] = value
-		}
+		setWhite(id)
 	}
 
 	infos.rebuildHashIndex()
 }
 
-// rebuildHashIndex 根据当前 IDs 重建 hash -> uid 反查表, 调用方必须已持有 infos.Mutex 写锁
+// rebuildHashIndex 根据当前 IDs 重建 hash -> uid 反查表, 调用方必须已持有 infos.Mutex 写锁。
+// 碰撞时保留较小 UID（遍历顺序确定, 保证跨重启结果一致）; 被碰撞者的链接鉴权
+// 走 calculateHash 直接计算, 不受反查表缺失影响
 func (infos *Infos) rebuildHashIndex() {
 	index := make(map[string]int64, len(infos.IDs))
+	uids := make([]int64, 0, len(infos.IDs))
 	for uid := range infos.IDs {
+		uids = append(uids, uid)
+	}
+	sort.Slice(uids, func(i, j int) bool { return uids[i] < uids[j] })
+	for _, uid := range uids {
 		if hash := infos.calculateHash(uid); hash != "" {
+			if owner, ok := index[hash]; ok && owner != uid {
+				continue
+			}
 			index[hash] = uid
 		}
 	}
@@ -60,6 +76,15 @@ func (infos *Infos) isAdmin(id int64) bool {
 	if value, ok := infos.IDs[id]; ok {
 		return value.IsAdmin
 	}
+	return false
+}
+
+// requireAdmin 校验发送者是否为管理员, 非管理员自动回复权限提示后返回 false
+func (infos *Infos) requireAdmin(m *telegram.NewMessage) bool {
+	if infos.isAdmin(m.SenderID()) {
+		return true
+	}
+	sendMS(m, "你没有使用此命令的权限", nil, 60)
 	return false
 }
 
