@@ -171,36 +171,39 @@ func handleRanHeader(src string, size int64) (start, end int64) {
 		return 0, size - 1
 	}
 	src = strings.TrimSpace(strings.TrimPrefix(src, "bytes="))
+
+	// 快速路径: bytes=0- 是最常见的整段读取请求, 免去拆分与整数解析
+	if src == "0-" && size > 0 {
+		return 0, size - 1
+	}
+
 	parts := strings.SplitN(src, "-", 2)
-	if len(parts) == 2 {
-		if parts[0] == "" {
-			suffixLength, err := strconv.ParseInt(parts[1], 10, 64)
-			if err == nil && suffixLength > 0 {
-				start = size - suffixLength
-				end = size - 1
-				if start < 0 {
-					start = 0
-				}
-			} else {
-				start, end = 0, size-1
-			}
-		} else {
-			var err error
-			start, err = strconv.ParseInt(parts[0], 10, 64)
-			if err != nil {
+	if len(parts) < 2 {
+		// 缺少 "-" 分隔符（非法或纯数字）, 整体视为从头读取
+		start, end = 0, size-1
+	} else if parts[0] == "" {
+		// bytes=-N: 请求文件末尾 N 字节
+		n, err := strconv.ParseInt(parts[1], 10, 64)
+		if err == nil && n > 0 {
+			start = size - n
+			if start < 0 {
 				start = 0
 			}
-			if parts[1] != "" {
-				end, err = strconv.ParseInt(parts[1], 10, 64)
-				if err != nil {
-					end = size - 1
-				}
-			} else {
-				end = size - 1
-			}
+			end = size - 1
+		} else {
+			start, end = 0, size-1
 		}
 	} else {
-		start, end = 0, size-1
+		// bytes=A-B 或 bytes=A-
+		if n, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+			start = n
+		}
+		end = size - 1
+		if parts[1] != "" {
+			if n, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
+				end = n
+			}
+		}
 	}
 	if end >= size {
 		end = size - 1
@@ -314,7 +317,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 
 	buf := new(bytes.Buffer)
 	// 下载→引用过期刷新→TCP 断开唤醒的公共重试逻辑, 与 handleStream 小文件分支共用
-	if !infos.downloadMediaRetry(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
+	if !infos.downloadMediaR(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
 		ThumbOnly: true,
 		ThumbSize: actualThumb,
 		Buffer:    buf,
@@ -331,9 +334,9 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// downloadMediaRetry 下载媒体到 buf, 引用过期自动刷新引用重试、TCP 断开标记失败并异步唤醒主连接。
+// downloadMediaR 下载媒体到 buf, 引用过期自动刷新引用重试、TCP 断开标记失败并异步唤醒主连接。
 // 成功返回 true; 失败时已将错误写入 HTTP 响应并返回 false。handlePic 与 handleStream 小文件分支共用。
-func (infos *Infos) downloadMediaRetry(w http.ResponseWriter, client *telegram.Client, cate string, src *telegram.NewMessage, param HandleMs, msCache *MsCache, buf *bytes.Buffer, opts *telegram.DownloadOptions, failMsg string) bool {
+func (infos *Infos) downloadMediaR(w http.ResponseWriter, client *telegram.Client, cate string, src *telegram.NewMessage, param HandleMs, msCache *MsCache, buf *bytes.Buffer, opts *telegram.DownloadOptions, failSrc string) bool {
 	maxCount := 2
 	for count := 1; count <= maxCount; count++ {
 		version := msCache.Version.Load()
@@ -373,7 +376,7 @@ func (infos *Infos) downloadMediaRetry(w http.ResponseWriter, client *telegram.C
 			return false
 		}
 	}
-	http.Error(w, failMsg, http.StatusInternalServerError)
+	http.Error(w, failSrc, http.StatusInternalServerError)
 	return false
 }
 
@@ -608,7 +611,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		clientIP := GetClientIP(r)
 		log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, fileName)
 		buf := new(bytes.Buffer)
-		if !infos.downloadMediaRetry(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
+		if !infos.downloadMediaR(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
 			Buffer:    buf,
 			ChunkSize: int32(chunkSize),
 			Threads:   workers,
