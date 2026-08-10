@@ -541,7 +541,7 @@ func (stream *Stream) handlePool(numTask int, src telegram.MessageMedia) *telegr
 	if dc == 0 {
 		dc = int32(stream.Client.GetDC())
 	}
-	pool, err := stream.Client.NewDownloadPool(dc)
+	pool, err := stream.Client.NewDownloadPool(dc, stream.Ctx)
 	if err != nil {
 		log.Printf("协程%d 初始化 DC%d 连接池失败: %+v, 回退临时连接", numTask, dc, err)
 		return nil
