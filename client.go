@@ -581,7 +581,7 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 	conf = telegram.ClientConfig{
 		AppID:        appConf.AppID,
 		AppHash:      appConf.AppHash,
-		LogLevel:     telegram.LogError,
+		LogLevel:     gogramLogLevel(appConf.DeBUG),
 		Session:      filepath.Join(infos.FilesPath, fmt.Sprintf("%s.session", cate)),
 		Cache:        telegram.NewCache(filepath.Join(infos.FilesPath, fmt.Sprintf("%s.cache", cate))),
 		CacheSenders: true,
@@ -616,6 +616,14 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 	return conf
 }
 
+// gogramLogLevel 根据 DeBUG 配置返回 gogram 客户端日志级别, 便于排查导出授权等底层错误
+func gogramLogLevel(debug bool) telegram.LogLevel {
+	if debug {
+		return telegram.LogDebug
+	}
+	return telegram.LogError
+}
+
 // parseFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
 func (infos *Infos) parseFloodWait(errSrc string) (wait int, matched bool) {
 	wait = 3
@@ -632,7 +640,7 @@ func (infos *Infos) parseFloodWait(errSrc string) (wait int, matched bool) {
 			}
 		}
 	} else {
-		log.Printf("错误信息不是 FLOOD_WAIT: %s", errSrc)
+		log.Printf("错误信息不是 FLOOD WAIT: %s", errSrc)
 	}
 	return wait, matched
 }
