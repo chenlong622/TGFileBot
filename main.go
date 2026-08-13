@@ -284,9 +284,12 @@ func main() {
 
 	// 3. 校验关键配置参数
 	conf := infos.Conf.Load()
-	if conf.AppID == 0 || conf.AppHash == "" || conf.BotToken == "" {
-		log.Panicf("配置文件缺少必要的参数: AppID、AppHash、BotToken")
-		return
+	if conf.AppID == 0 || conf.AppHash == "" || conf.BotToken == "" || conf.UserID == 0 {
+		log.Panicf("配置文件缺少必要的参数: AppID、AppHash、BotToken、UserID")
+	}
+
+	if conf.Site != "" && !strings.HasPrefix(conf.Site, "http://") && !strings.HasPrefix(conf.Site, "https://") {
+		log.Panicf("配置文件 site 必须以 http:// 或 https:// 开头")
 	}
 
 	if conf.Port == 0 {
@@ -401,11 +404,12 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 		if err != nil {
 			log.Printf("无法打开日志文件: %+v", err)
+		} else {
+			infos.File = file
+			// 设置日志输出
+			multiWriter := io.MultiWriter(os.Stdout, file)
+			log.SetOutput(multiWriter)
 		}
-		infos.File = file
-		// 设置日志输出
-		multiWriter := io.MultiWriter(os.Stdout, file)
-		log.SetOutput(multiWriter)
 	}
 
 	// 加载配置文件
@@ -427,8 +431,8 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 	// 获取 BotID
 	if conf.BotToken != "" {
 		parts := strings.Split(conf.BotToken, ":")
-		if len(parts) < 1 {
-			return nil, fmt.Errorf("BotToken 格式错误: %s", conf.BotToken)
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("BotToken 格式错误")
 		}
 		result := strings.TrimSpace(parts[0])
 		infos.BotID, err = strconv.ParseInt(result, 10, 64)
