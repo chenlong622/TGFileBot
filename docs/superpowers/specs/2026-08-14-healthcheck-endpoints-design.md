@@ -11,12 +11,13 @@
 
 | 端点 | 类型 | 逻辑 | 响应 |
 |------|------|------|------|
-| `GET /healthz` | liveness | 进程存活即返回 200 | `200` + JSON `{"status":"ok"}` |
+| `GET /livez` | liveness | 进程存活即返回 200 | `200` + JSON `{"status":"ok"}` |
+| `GET /healthz` | liveness | `/healthz` 自 Kubernetes v1.16 起弃用, 保留作 `/livez` 的兼容别名 | 同 `/livez` |
 | `GET /readyz` | readiness | UserBot 已登录（`infos.Status == 3`）返回 200，否则 503 | `200`/`503` + JSON `{"status":"ready"/"not_ready"}` |
 
 ## 实现
 
-- 在 `handleMain` 的 `switch` 中新增 `case path == "/healthz"` 与 `case path == "/readyz"`，复用现有路由分发。
+- 在 `handleMain` 的 `switch` 中新增 `case path == "/livez"`（与 `/healthz` 别名共用一个 case）与 `case path == "/readyz"`，复用现有路由分发。
 - 无鉴权（探针不应携带 password/hash）。
 - 通过 `infos.Status.Load()` 判断 UserBot 登录状态（值 3 = 已登录）。
 

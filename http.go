@@ -44,8 +44,9 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 			log.Printf("发送网页失败: %+v", err)
 		}
 		return
-	case path == "/healthz":
+	case path == "/livez", path == "/healthz":
 		// k8s liveness 探针: 进程存活即返回 200, 无需鉴权
+		// (healthz 已自 Kubernetes v1.16 弃用, 保留作兼容别名)
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
 			log.Printf("发送网页失败: %+v", err)
