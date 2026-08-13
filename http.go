@@ -44,6 +44,27 @@ func handleMain(w http.ResponseWriter, r *http.Request) {
 			log.Printf("发送网页失败: %+v", err)
 		}
 		return
+	case path == "/healthz":
+		// k8s liveness 探针: 进程存活即返回 200, 无需鉴权
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+			log.Printf("发送网页失败: %+v", err)
+		}
+		return
+	case path == "/readyz":
+		// k8s readiness 探针: UserBot 已登录(状态 3)才算就绪, 无需鉴权
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		if infos.Status.Load() == 3 {
+			if err := json.NewEncoder(w).Encode(map[string]string{"status": "ready"}); err != nil {
+				log.Printf("发送网页失败: %+v", err)
+			}
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "not_ready"}); err != nil {
+			log.Printf("发送网页失败: %+v", err)
+		}
+		return
 	case path == "/pic":
 		handlePic(w, r)
 		return
