@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json" // 用于解析 JSON 配置文件
+	"fmt"           // 用于格式化错误信息
 	"io"            // 用于读取文件内容
 	"log"           // 用于日志记录
 	"os"            // 用于文件操作
@@ -63,6 +64,13 @@ func loadConf(filesPath string) (*Conf, error) {
 		return nil, err
 	}
 
+	// 校验端口范围：0 表示未设置（由 main 填充默认值 8080），负数和超出
+	// TCP 合法范围的端口都应视为配置错误，避免运行期才在 ListenAndServe 报错。
+	if conf.Port < 0 || conf.Port > 65535 {
+		log.Printf("config.json 中 port 超出合法范围(1-65535): %d", conf.Port)
+		return nil, fmt.Errorf("port 超出合法范围: %d", conf.Port)
+	}
+
 	return &conf, nil // 返回解析后的配置对象
 }
 
@@ -78,10 +86,10 @@ func cloneConf(c *Conf) *Conf {
 	return &nc
 }
 
-// updateConf 以写者互斥的方式克隆当前配置、应用 mutate 中的修改、原子发布新快照并持久化到磁盘。
+// refreshConf 以写者互斥的方式克隆当前配置、应用 mutate 中的修改、原子发布新快照并持久化到磁盘。
 // mutate 可以放心地修改传入的副本（含对 slice 字段的增删), 不会影响其他 goroutine 正在并发
 // 读取的旧快照——infos.Conf.Load() 拿到的要么是完整的旧配置, 要么是完整的新配置, 不会读到中间状态。
-func (infos *Infos) updateConf(mutate func(c *Conf)) error {
+func (infos *Infos) refreshConf(mutate func(c *Conf)) error {
 	infos.ConfMu.Lock()
 	defer infos.ConfMu.Unlock()
 

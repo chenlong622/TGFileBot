@@ -79,8 +79,8 @@ func (infos *Infos) isAdmin(id int64) bool {
 	return false
 }
 
-// requireAdmin 校验发送者是否为管理员, 非管理员自动回复权限提示后返回 false
-func (infos *Infos) requireAdmin(m *telegram.NewMessage) bool {
+// needAdmin 校验发送者是否为管理员, 非管理员自动回复权限提示后返回 false
+func (infos *Infos) needAdmin(m *telegram.NewMessage) bool {
 	if infos.isAdmin(m.SenderID()) {
 		return true
 	}

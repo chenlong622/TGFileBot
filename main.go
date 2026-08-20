@@ -115,14 +115,16 @@ type MsCache struct {
 	Version  atomic.Int64
 }
 
-// load 在持有 infos.Mutex 读锁的情况下安全地取出当前消息列表。
-// msCache 一旦被写入 infos.MsCache 就可能被并发的多个请求共享；refreshMs
-// 以及流式下载完成后的缓存回写都会在持锁状态下重新赋值 Mes 字段，
+// load 在持有 infos.Mutex 读锁的情况下安全地取出当前消息列表，并返回一份
+// 防御性拷贝。msCache 一旦被写入 infos.MsCache 就可能被并发的多个请求共享；
+// refreshMs 以及流式下载完成后的缓存回写都会在持锁状态下重新赋值 Mes 字段。
 // 因此所有读取都必须走这里，而不是直接 msCache.Mes（否则可能读到撕裂的 slice header）。
+// 拷贝使调用方对返回切片做 append（如 handleComments 追加评论消息）时，
+// 不会把数据写进缓存共享的底层数组，避免并发 append 同槽位的数据竞争。
 func (msCache *MsCache) load() []telegram.NewMessage {
 	infos.Mutex.RLock()
 	defer infos.Mutex.RUnlock()
-	return msCache.Mes
+	return append([]telegram.NewMessage(nil), msCache.Mes...)
 }
 
 type Item struct {
@@ -195,7 +197,7 @@ type Infos struct {
 	UserClient   atomic.Pointer[telegram.Client] // 全局 UserBot 客户端实例（用于读取私有内容和流式传输）, 原子指针支持无锁并发读写
 	Mutex        *sync.RWMutex                   // 全局互斥锁, 保护并发安全
 	Cond         *sync.Cond                      // 条件变量, 用于搜索并发限流等待（独立锁, 不与 Mutex 共用）
-	Conf         atomic.Pointer[Conf]            // 全局配置快照, 原子指针支持无锁并发读；更新走 updateConf（写时拷贝）
+	Conf         atomic.Pointer[Conf]            // 全局配置快照, 原子指针支持无锁并发读；更新走 refreshConf（写时拷贝）
 	ConfMu       *sync.Mutex                     // 序列化配置更新, 避免并发管理员命令互相覆盖对方的修改
 	File         *os.File                        // 日志文件句柄
 	Rex          *regexp.Regexp                  // 用于解析 Telegram FloodWait 错误的正则
@@ -223,8 +225,8 @@ type Infos struct {
 	} // 记录TCP连接状态
 }
 
-// tcpStat 按类别返回对应的 TCP 探活状态, 用于收敛调用方重复的 switch cate 判断
-func (infos *Infos) tcpStat(cate string) *TCPStatu {
+// connectStat 按类别返回对应的 TCP 探活状态, 用于收敛调用方重复的 switch cate 判断
+func (infos *Infos) connectStat(cate string) *TCPStatu {
 	if cate == "user" {
 		return &infos.TCPStatus.User
 	}

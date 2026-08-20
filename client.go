@@ -428,9 +428,9 @@ func (infos *Infos) resetStatus() {
 	infos.Status.Store(0)
 }
 
-// waitInput 是登录流程的通用等待器: CAS 原子转移状态成功后, 通过 Bot 提示用户输入,
+// waitSrc 是登录流程的通用等待器: CAS 原子转移状态成功后, 通过 Bot 提示用户输入,
 // 再在通道与超时之间二选一等待结果, 超时自动重置为未登录状态并返回错误
-func (infos *Infos) waitInput(from, to int32, input chan string, stateName, waitMsg, timeoutMsg string) (string, error) {
+func (infos *Infos) waitSrc(from, to int32, input chan string, stateName, waitMsg, timeoutMsg string) (string, error) {
 	if !infos.Status.CompareAndSwap(from, to) {
 		err := fmt.Errorf("当前状态不是等待%s", stateName)
 		sendMS(nil, err.Error(), nil, 60)
@@ -453,7 +453,7 @@ func (infos *Infos) waitInput(from, to int32, input chan string, stateName, wait
 
 // code 是登录回调, 暂停协程等待用户通过 Bot 发送验证码
 func (infos *Infos) code() (string, error) {
-	return infos.waitInput(0, 1, infos.Code, "验证码", "等待用户输入 /code 验证码...", "等待验证码超时")
+	return infos.waitSrc(0, 1, infos.Code, "验证码", "等待用户输入 /code 验证码...", "等待验证码超时")
 }
 
 // submitCode 接收用户通过 Bot 发送的验证码并写入通道
@@ -491,7 +491,7 @@ func (infos *Infos) submitCode(str string) (err error) {
 
 // pass 是登录回调, 暂停协程等待用户通过 Bot 发送 2FA 密码
 func (infos *Infos) pass() (string, error) {
-	return infos.waitInput(1, 2, infos.Pass, "2FA密码", "等待用户输入 /pass 2FA密码...", "等待2FA密码超时")
+	return infos.waitSrc(1, 2, infos.Pass, "2FA密码", "等待用户输入 /pass 2FA密码...", "等待2FA密码超时")
 }
 
 // submitPass 接收用户通过 Bot 发送的 2FA 密码并写入通道
@@ -563,7 +563,7 @@ func (infos *Infos) wakeTCP(client *telegram.Client, cate string) error {
 			if debug {
 				log.Printf("TCP 链路已恢复, 延迟: %dms", value.Milliseconds())
 			}
-			infos.tcpStat(cate).wake(value.Milliseconds())
+			infos.connectStat(cate).wake(value.Milliseconds())
 			return nil
 		}
 	}
@@ -571,7 +571,7 @@ func (infos *Infos) wakeTCP(client *telegram.Client, cate string) error {
 	if debug {
 		log.Printf("TCP 链路正常, 延迟: %dms", latenc.Milliseconds())
 	}
-	infos.tcpStat(cate).wake(latenc.Milliseconds())
+	infos.connectStat(cate).wake(latenc.Milliseconds())
 	return nil
 }
 
@@ -581,7 +581,7 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 	conf = telegram.ClientConfig{
 		AppID:        appConf.AppID,
 		AppHash:      appConf.AppHash,
-		LogLevel:     gogramLogLevel(appConf.DeBUG),
+		LogLevel:     infoLevel(appConf.DeBUG),
 		Session:      filepath.Join(infos.FilesPath, fmt.Sprintf("%s.session", cate)),
 		Cache:        telegram.NewCache(filepath.Join(infos.FilesPath, fmt.Sprintf("%s.cache", cate))),
 		CacheSenders: true,
@@ -591,7 +591,7 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 			AppVersion:    "10.14.3",
 		},
 		FloodHandler: func(ctx context.Context, err error) bool {
-			wait, _ := infos.parseFloodWait(err.Error())
+			wait, _ := infos.handleFloodWait(err.Error())
 			log.Printf("访问太过频繁, 等待 %d 秒后重试", wait+1)
 			infos.advanceWaitUntil(wait)
 
@@ -616,16 +616,16 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 	return conf
 }
 
-// gogramLogLevel 根据 DeBUG 配置返回 gogram 客户端日志级别, 便于排查导出授权等底层错误
-func gogramLogLevel(debug bool) telegram.LogLevel {
+// infoLevel 根据 DeBUG 配置返回 gogram 客户端日志级别, 便于排查导出授权等底层错误
+func infoLevel(debug bool) telegram.LogLevel {
 	if debug {
 		return telegram.LogDebug
 	}
 	return telegram.LogError
 }
 
-// parseFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
-func (infos *Infos) parseFloodWait(errSrc string) (wait int, matched bool) {
+// handleFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
+func (infos *Infos) handleFloodWait(errSrc string) (wait int, matched bool) {
 	wait = 3
 	errSrc = strings.ToUpper(errSrc)
 	matches := infos.Rex.FindStringSubmatch(errSrc)
@@ -718,7 +718,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 			continue
 		}
 
-		if IsVideoFile(m.File.Ext) && m.File.Size < filter {
+		if isVideoFile(m.File.Ext) && m.File.Size < filter {
 			continue
 		}
 
@@ -736,7 +736,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 			count := 0
 			newMIDs := make(map[int32]bool, len(medias))
 			for _, media := range medias {
-				if IsVideoFile(media.File.Ext) && media.File.Size < filter {
+				if isVideoFile(media.File.Ext) && media.File.Size < filter {
 					continue
 				}
 				if value, ok := mids[media.ID]; ok && value {
@@ -771,7 +771,7 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 
 	if TCPDead {
 		go func() {
-			status := infos.tcpStat("user")
+			status := infos.connectStat("user")
 			status.fail(infos.UserClient.Load())
 			if status.TCPDead.Load() {
 				if err := infos.wakeTCP(infos.UserClient.Load(), "user"); err != nil {
@@ -829,7 +829,7 @@ func (infos *Infos) search(channel, keywords string, page, limit int, offset int
 			continue
 		}
 
-		if IsVideoFile(m.File.Ext) && m.File.Size < filter {
+		if isVideoFile(m.File.Ext) && m.File.Size < filter {
 			continue
 		}
 
@@ -863,7 +863,7 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 		client = infos.BotClient.Load()
 	}
 
-	stat := infos.tcpStat(params.Cate)
+	stat := infos.connectStat(params.Cate)
 	latenc := stat.Latenc.Load()
 	duration := stat.since()
 
@@ -1060,7 +1060,7 @@ func (infos *Infos) refreshMs(client *telegram.Client, version int64, params Han
 	})
 	if err != nil {
 		go func() {
-			status := infos.tcpStat(params.Cate)
+			status := infos.connectStat(params.Cate)
 			status.fail(client)
 			if status.TCPDead.Load() {
 				if err := infos.wakeTCP(client, params.Cate); err != nil {
@@ -1137,7 +1137,7 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 			values, err := client.ResolvePeer(channel)
 			if err != nil {
 				go func() {
-					status := infos.tcpStat("user")
+					status := infos.connectStat("user")
 					status.fail(client)
 					if status.TCPDead.Load() {
 						if err := infos.wakeTCP(client, "user"); err != nil {
@@ -1243,7 +1243,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 
 		if err != nil {
 			go func() {
-				status := infos.tcpStat("user")
+				status := infos.connectStat("user")
 				status.fail(client)
 				if status.TCPDead.Load() {
 					if err := infos.wakeTCP(client, "user"); err != nil {

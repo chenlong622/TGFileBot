@@ -49,3 +49,4 @@ files/user.session
 files.zip
 files/log.log
 .planning/*
+*test.go

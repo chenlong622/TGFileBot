@@ -32,13 +32,13 @@ var (
 	sizeDigitSuffixRe = regexp.MustCompile(`\d$`)
 )
 
-// IsVideoFile 判断文件后缀是否为视频文件
-func IsVideoFile(ext string) bool {
+// isVideoFile 判断文件后缀是否为视频文件
+func isVideoFile(ext string) bool {
 	return videoExt[strings.ToLower(ext)]
 }
 
-// IsImFile 判断文件后缀是否为图片文件
-func IsImFile(ext string) bool {
+// isPicFile 判断文件后缀是否为图片文件
+func isPicFile(ext string) bool {
 	return imExt[strings.ToLower(ext)]
 }
 
@@ -256,8 +256,8 @@ func isAllNumber(s string) bool {
 	return true
 }
 
-// GetClientIP 从http.Request中提取客户端真实IP，支持代理场景和IPv6
-func GetClientIP(r *http.Request) string {
+// handleClientIP 从http.Request中提取客户端真实IP，支持代理场景和IPv6
+func handleClientIP(r *http.Request) string {
 	// 1. 优先处理X-Forwarded-For（代理场景）
 	xForwardedFor := r.Header.Get("X-Forwarded-For")
 	if xForwardedFor != "" {
@@ -400,10 +400,10 @@ func sortItems(items []Item, reverse bool) {
 	})
 }
 
-// contentDisposition 构造安全的 Content-Disposition 头。
+// contentDis 构造安全的 Content-Disposition 头。
 // 对 ASCII 回退字段中的引号/反斜杠做转义、剔除控制字符（防止破坏 quoted-string 语法或注入首部），
 // 并附带 RFC 6266 的 filename* 参数以正确显示中文等非 ASCII 文件名。
-func contentDisposition(disposition, fileName string) string {
+func contentDis(disposition, fileName string) string {
 	clean := strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f {
 			return -1

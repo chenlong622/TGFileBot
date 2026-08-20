@@ -281,7 +281,7 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					}
 					continue
 				default:
-					if wait, flood := infos.parseFloodWait(errStr); flood {
+					if wait, flood := infos.handleFloodWait(errStr); flood {
 						if infos.Conf.Load().DeBUG {
 							log.Printf("协程%d: 访问太过频繁, 等待 %d 秒后重试", numTask, wait+1)
 						}

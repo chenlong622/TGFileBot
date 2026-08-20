@@ -283,7 +283,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 	}
 
 	src := ms[0]
-	stat := infos.tcpStat(cate)
+	stat := infos.connectStat(cate)
 
 	// 从媒体中查找最大的 PhotoSize
 	var actualThumb telegram.PhotoSize
@@ -334,7 +334,7 @@ func handlePic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := GetClientIP(r)
+	clientIP := handleClientIP(r)
 	log.Printf("正在处理来自 %s 的请求, 开始下载封面, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, src.File.Name)
 
 	buf := new(bytes.Buffer)
@@ -384,7 +384,7 @@ func (infos *Infos) downloadMediaR(w http.ResponseWriter, client *telegram.Clien
 			return false
 		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			stat := infos.tcpStat(cate)
+			stat := infos.connectStat(cate)
 			go func() {
 				stat.fail(client)
 				if stat.TCPDead.Load() {
@@ -465,7 +465,7 @@ func handleLink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := GetClientIP(r)
+	clientIP := handleClientIP(r)
 	log.Printf("正在处理来自 %s 的请求, 开始提取直链, link=%s", clientIP, src)
 
 	// 3. 正则匹配并解析链接
@@ -610,7 +610,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("download") == "true" {
 			disposition = "attachment"
 		}
-		w.Header().Set("Content-Disposition", contentDisposition(disposition, fileName))
+		w.Header().Set("Content-Disposition", contentDis(disposition, fileName))
 
 		// 与大文件分支一致地解析 Range 头, 避免小文件分支明明声明了 Accept-Ranges 却始终整体返回 200,
 		// 导致播放器/下载工具的 seek、断点续传在小文件上失效
@@ -630,7 +630,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		clientIP := GetClientIP(r)
+		clientIP := handleClientIP(r)
 		log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s", clientIP, params.CID, params.MID, fileName)
 		buf := new(bytes.Buffer)
 		if !infos.downloadMediaR(w, client, cate, &src, param, msCache, buf, &telegram.DownloadOptions{
@@ -641,7 +641,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		}, "下载失败: 文件引用持续过期") {
 			return
 		}
-		infos.tcpStat(cate).touch()
+		infos.connectStat(cate).touch()
 
 		content := buf.Bytes()
 		if ranHeader == "" {
@@ -685,7 +685,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("download") == "true" {
 			disposition = "attachment" // 附件模式下载
 		}
-		w.Header().Set("Content-Disposition", contentDisposition(disposition, fileName))
+		w.Header().Set("Content-Disposition", contentDis(disposition, fileName))
 
 		// 7. 处理 HTTP Range 请求（分段读取的核心逻辑）
 		ranHeader := r.Header.Get("Range")
@@ -711,7 +711,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		clientIP := GetClientIP(r)
+		clientIP := handleClientIP(r)
 		log.Printf("正在处理来自 %s 的请求, 开始下载, cid=%d, mid=%d, name=%s, start=%d, end=%d", clientIP, params.CID, params.MID, fileName, start, end)
 
 		// 缓存逻辑：检查头部/尾部缓存是否命中, 并决定实际下载起点
@@ -741,7 +741,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			// 异步清理：不阻塞当前请求 goroutine 返回，使新请求能立即被处理
 			go stream.clean()
 			// TCP 断开 → 立即唤醒（无论当前请求成功与否）
-			if infos.tcpStat(cate).TCPDead.Load() {
+			if infos.connectStat(cate).TCPDead.Load() {
 				go func() {
 					if err := infos.wakeTCP(client, cate); err != nil {
 						log.Printf("TCP 重连失败: %+v", err)
@@ -802,7 +802,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						// 检查是否已经写完当前请求的所有范围
 						if task.ContentEnd >= end {
 							log.Printf("流式传输文件已完成: cid=%d, mid=%d, name=%s", params.CID, params.MID, fileName)
-							status := infos.tcpStat(cate)
+							status := infos.connectStat(cate)
 							if status.TCPDead.Load() {
 								if err := infos.wakeTCP(client, cate); err != nil {
 									log.Printf("TCP 重连失败: %+v", err)
@@ -897,7 +897,7 @@ func handleSources(w http.ResponseWriter, r *http.Request) {
 		filter = params.Filters[0]
 	}
 	for _, m := range ms {
-		if IsVideoFile(m.File.Ext) && m.File.Size < filter {
+		if isVideoFile(m.File.Ext) && m.File.Size < filter {
 			continue
 		}
 		item := handleItem(m)
@@ -941,7 +941,7 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 	offset := params.Offset
 	limit := params.Limit
 
-	clientIP := GetClientIP(r)
+	clientIP := handleClientIP(r)
 	log.Printf("正在处理来自 %s 的请求, 开始搜索, page=%d, offset=%d, limit=%d, keywords=%s", clientIP, page, offset, limit, src)
 
 	// 整个搜索请求使用同一份配置快照, Conf 已是原子指针, 无需再靠 Mutex 保护读取
@@ -1127,7 +1127,7 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 		if m.File == nil || m.Channel == nil {
 			continue
 		}
-		if IsVideoFile(m.File.Ext) && m.File.Size < filter {
+		if isVideoFile(m.File.Ext) && m.File.Size < filter {
 			continue
 		}
 

@@ -78,7 +78,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil)
 			return nil
 		case strings.HasPrefix(text, "/allow"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			whiteID, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(text, "/allow")), 10, 64)
@@ -89,7 +89,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 
 			if whiteID != 0 {
 				added := false
-				if err := infos.updateConf(func(c *Conf) {
+				if err := infos.refreshConf(func(c *Conf) {
 					if !slices.Contains(c.WhiteIDs, whiteID) {
 						c.WhiteIDs = append(c.WhiteIDs, whiteID)
 						added = true
@@ -121,7 +121,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/disallow"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/disallow"))
@@ -148,7 +148,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			var whiteID int64
 			var successMsg string
 			found := false
-			if err := infos.updateConf(func(c *Conf) {
+			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if index >= 0 && index < len(c.WhiteIDs) {
 						whiteID = c.WhiteIDs[index]
@@ -262,7 +262,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, "提交2FA密码成功", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/dc"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/dc"))
@@ -283,13 +283,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "DC必须在1-5之间", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.DC = value }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.DC = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			sendMS(m, fmt.Sprintf("DC已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/site"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/site"))
@@ -301,13 +301,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "反代地址格式错误", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.Site = content }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.Site = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			sendMS(m, fmt.Sprintf("反代地址已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/size"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/size"))
@@ -320,7 +320,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "最大缓存格式错误", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.MaxSize = value }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.MaxSize = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			src := fmt.Sprintf("最大缓存已设置为: %s", formatFileSize(value))
@@ -330,7 +330,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/proxy"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/proxy"))
@@ -350,13 +350,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "代理地址格式错误", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.Proxy = content }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.Proxy = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			sendMS(m, fmt.Sprintf("代理已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/password"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/password"))
@@ -364,7 +364,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, fmt.Sprintf("当前密码: %s", conf.Password), nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.Password = content }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.Password = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			// 密码变化会改变每个 uid 对应的哈希, 需要整体重建反查表
@@ -374,7 +374,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("密码已设置为: %s", content), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/channel"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/channel"))
@@ -390,13 +390,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, fmt.Sprintf("频道ID格式错误: %+v", err), nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.ChannelID = value }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.ChannelID = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			sendMS(m, fmt.Sprintf("频道ID已设置为: %d", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/workers"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/workers"))
@@ -413,7 +413,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "并发数必须大于 0", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.Workers = num }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.Workers = num }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			src := fmt.Sprintf("并发数已设置为: %d", num)
@@ -423,7 +423,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, src, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/check"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/check"))
@@ -450,7 +450,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/add") && !strings.HasPrefix(text, "/addrule"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			channel := strings.TrimSpace(strings.TrimPrefix(text, "/add"))
@@ -461,7 +461,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			channel = strings.TrimPrefix(channel, "@")
 
 			added := false
-			if err := infos.updateConf(func(c *Conf) {
+			if err := infos.refreshConf(func(c *Conf) {
 				if !slices.Contains(c.Channels, channel) {
 					c.Channels = append(c.Channels, channel)
 					added = true
@@ -477,7 +477,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, fmt.Sprintf("添加频道成功: %s", channel), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/del") && !strings.HasPrefix(text, "/delrule"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/del"))
@@ -497,7 +497,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 
 			var removed, successMsg string
 			found := false
-			if err := infos.updateConf(func(c *Conf) {
+			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if indexErr == nil && index >= 0 && index < len(c.Channels) {
 						removed = c.Channels[index]
@@ -533,7 +533,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, successMsg, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/list"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/list"))
@@ -589,7 +589,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/port"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/port"))
@@ -606,13 +606,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				sendMS(m, "端口必须在 1-65535 之间", nil, 60)
 				return nil
 			}
-			if err := infos.updateConf(func(c *Conf) { c.Port = value }); err != nil {
+			if err := infos.refreshConf(func(c *Conf) { c.Port = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
 			}
 			sendMS(m, fmt.Sprintf("端口已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/info"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 
@@ -664,7 +664,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			return nil
 		case strings.HasPrefix(text, "/addrule"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			rule := strings.TrimSpace(strings.TrimPrefix(text, "/addrule"))
@@ -678,7 +678,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 
 			added := false
-			if err := infos.updateConf(func(c *Conf) {
+			if err := infos.refreshConf(func(c *Conf) {
 				if !slices.Contains(c.Rules, rule) {
 					c.Rules = append(c.Rules, rule)
 					added = true
@@ -695,7 +695,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			sendMS(m, "添加正则规则成功", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/delrule"):
-			if !infos.requireAdmin(m) {
+			if !infos.needAdmin(m) {
 				return nil
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/delrule"))
@@ -714,7 +714,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 
 			var removed, successMsg string
 			found := false
-			if err := infos.updateConf(func(c *Conf) {
+			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if indexErr == nil && index >= 0 && index < len(c.Rules) {
 						removed = c.Rules[index]
