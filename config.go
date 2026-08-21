@@ -71,6 +71,20 @@ func loadConf(filesPath string) (*Conf, error) {
 		return nil, fmt.Errorf("port 超出合法范围: %d", conf.Port)
 	}
 
+	// 校验核心资源边界
+	if conf.Workers <= 0 {
+		log.Printf("config.json 中 workers 无效: %d, 回退至默认值 2", conf.Workers)
+		conf.Workers = 2
+	}
+	if conf.MaxSize <= 0 {
+		log.Printf("config.json 中 maxSize 无效: %d, 回退至默认值 32MB", conf.MaxSize)
+		conf.MaxSize = 32 * 1024 * 1024
+	}
+	if conf.UserID == 0 {
+		log.Printf("config.json 中 userID 未设置, 请检查配置文件")
+		return nil, fmt.Errorf("userID 不能为空")
+	}
+
 	return &conf, nil // 返回解析后的配置对象
 }
 

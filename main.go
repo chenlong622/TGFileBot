@@ -419,12 +419,6 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 	if err != nil {
 		log.Fatalf("载入配置文件失败: %+v", err)
 	}
-	if conf.Workers == 0 {
-		conf.Workers = 1
-	}
-	if conf.MaxSize == 0 {
-		conf.MaxSize = 32 * 1024 * 1024
-	}
 	infos.Conf.Store(conf)
 	infos.IDs = make(map[int64]ID, len(conf.AdminIDs)+len(conf.WhiteIDs)+1)
 	infos.buildIDs()

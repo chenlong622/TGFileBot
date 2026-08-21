@@ -361,7 +361,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			content := strings.TrimSpace(strings.TrimPrefix(text, "/password"))
 			if content == "" {
-				sendMS(m, fmt.Sprintf("当前密码: %s", conf.Password), nil, 60)
+				sendMS(m, "当前密码已设置", nil, 60)
 				return nil
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Password = content }); err != nil {
@@ -371,7 +371,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			infos.Mutex.Lock()
 			infos.rebuildHashIndex()
 			infos.Mutex.Unlock()
-			sendMS(m, fmt.Sprintf("密码已设置为: %s", content), nil, 60)
+			sendMS(m, "密码已更新, 重启后生效", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/channel"):
 			if !infos.needAdmin(m) {
