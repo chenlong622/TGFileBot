@@ -225,17 +225,24 @@ func (infos *Infos) userBotClient() (err error) {
 
 // startUserBot 发起手机号登录流程
 func (infos *Infos) startUserBot(phone string) (err error) {
-	infos.Mutex.Lock()
+	// 用独立的 LoginMu 序列化整个登录流程: Status 在回调触发前仍是 0,
+	// 仅靠状态检查无法拦截窗口期内并发到达的第二条 /phone, 会同时发起两个 Login
+	if !infos.LoMu.TryLock() {
+		err = errors.New("已有登录流程正在进行")
+		log.Printf("UserBot 登录失败: %+v", err)
+		return err
+	}
+
 	switch infos.Status.Load() {
 	case 1, 2:
 		// 正在进行验证码或密码输入状态, 不允许重复发起
-		infos.Mutex.Unlock()
+		infos.LoMu.Unlock()
 		err = errors.New("已有登录流程正在进行")
 		log.Printf("UserBot 登录失败: %+v", err)
 		return err
 	case 3:
 		// 已登录状态, 若客户端实例丢失则尝试重建
-		infos.Mutex.Unlock()
+		infos.LoMu.Unlock()
 		if infos.UserClient.Load() == nil {
 			if err := infos.userBotClient(); err != nil {
 				log.Printf("UserBot 登录失败: %+v", err)
@@ -246,18 +253,20 @@ func (infos *Infos) startUserBot(phone string) (err error) {
 		return nil
 	default:
 		// 未登录状态, 开始新的登录流程
-		infos.Mutex.Unlock()
 		if infos.UserClient.Load() == nil {
 			if err := infos.userBotClient(); err != nil {
 				log.Printf("UserBot 登录失败: %+v", err)
 				infos.resetStatus()
+				infos.LoMu.Unlock()
 				return err
 			}
 		}
 		sendMS(nil, fmt.Sprintf("收到手机号 %s, 正在尝试发送验证码...", phone), nil, 60)
 
-		// 在协程中执行阻塞的登录命令
+		// 在协程中执行阻塞的登录命令; LoginMu 的所有权移交给该协程,
+		// 直到登录成功或失败后才释放, 期间新的登录请求会被 TryLock 拒绝
 		go func() {
+			defer infos.LoMu.Unlock()
 			status, err := infos.UserClient.Load().Login(phone, &telegram.LoginOptions{
 				CodeCallback:     infos.code, // 指定验证码回调函数
 				PasswordCallback: infos.pass, // 指定二步验证回调函数
@@ -288,15 +297,21 @@ func (infos *Infos) startUserBot(phone string) (err error) {
 
 // startUserBotQR 发起二维码登录流程
 func (infos *Infos) startUserBotQR() (err error) {
-	infos.Mutex.Lock()
+	// 与 startUserBot 共用 LoginMu 序列化登录流程, 防止 /qr 与 /phone 同时发起
+	if !infos.LoMu.TryLock() {
+		err = errors.New("已有登录流程正在进行")
+		log.Printf("UserBot 登录失败: %+v", err)
+		return err
+	}
+
 	switch infos.Status.Load() {
 	case 1, 2:
-		infos.Mutex.Unlock()
+		infos.LoMu.Unlock()
 		err = errors.New("已有登录流程正在进行")
 		log.Printf("UserBot 登录失败: %+v", err)
 		return err
 	case 3:
-		infos.Mutex.Unlock()
+		infos.LoMu.Unlock()
 		if infos.UserClient.Load() == nil {
 			if err := infos.userBotClient(); err != nil {
 				log.Printf("UserBot 登录失败: %+v", err)
@@ -307,28 +322,35 @@ func (infos *Infos) startUserBotQR() (err error) {
 		return nil
 	default:
 		infos.Status.Store(1)
-		infos.Mutex.Unlock()
 		if infos.UserClient.Load() == nil {
 			if err := infos.userBotClient(); err != nil {
 				log.Printf("UserBot 登录失败: %+v", err)
 				infos.resetStatus()
+				infos.LoMu.Unlock()
 				return err
 			}
 		}
 		sendMS(nil, "正在请求登录二维码...", nil, 60)
 
-		// 启动登录流程（会阻塞, 直到登录完成或失败）
+		// 启动登录流程（会阻塞, 直到登录完成或失败）; LoginMu 所有权移交给该协程
 		go func() {
+			defer infos.LoMu.Unlock()
+
 			qr, err := infos.UserClient.Load().QRLogin(telegram.QrOptions{
 				PasswordCallback: infos.pass,
 			})
 			if err != nil {
 				log.Printf("获取 QR 登录失败: %+v", err)
-				if !telegram.MatchError(err, "SESSION_PASSWORD_NEEDED]") {
+				// 账号开启 2FA 时 exportLoginToken 直接报 SESSION_PASSWORD_NEEDED,
+				// 此时 QRLogin 返回的 qr 为 nil, 继续导出 PNG 会空指针 panic;
+				// 必须终止二维码流程并引导用户改走支持密码回调的手机号登录
+				if telegram.MatchError(err, "SESSION_PASSWORD_NEEDED]") {
+					sendMS(nil, "账号已开启两步验证, 无法使用二维码登录, 请发送 /phone + 手机号登录", nil, 120)
+				} else {
 					sendMS(nil, fmt.Sprintf("获取 QR 登录失败: %+v", err), nil, 60)
-					infos.resetStatus()
-					return
 				}
+				infos.resetStatus()
+				return
 			}
 
 			png, err := qr.ExportAsPng()
@@ -956,19 +978,20 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 	result, ok := infos.MsCache[kname]
 	infos.Mutex.RUnlock()
 
-	// hit 的判断与 result.Time 的更新必须在同一把锁内完成：result.Mes/Time 可能被
-	// refreshMs 或流式下载完成后的缓存回写并发修改（详见 MsCache.load 的注释）
+	// hit 的判断与 result.Time 的更新必须在同一把锁内完成：Time 可能被
+	// refreshMs 或流式下载完成后的缓存回写并发更新（Mes 本身是原子快照, 无需锁保护读取）
 	hit := false
 	if ok {
 		infos.Mutex.Lock()
-		if len(result.Mes) > 0 {
+		mes := result.load()
+		if len(mes) > 0 {
 			if freshReq {
 				// 首页请求只接受短 TTL 内的结果, 过期即重新拉取, 保证新内容及时可见
 				if time.Since(result.Time) < listFreshTTL {
 					hit = true
 					result.Time = time.Now()
 				}
-			} else if len(result.Mes) >= params.Limit {
+			} else if len(mes) >= params.Limit {
 				hit = true
 				result.Time = time.Now()
 			}
@@ -1010,7 +1033,8 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 			}
 			return result, err
 		}
-		result = &MsCache{Mes: ms, Time: time.Now(), Cate: params.Cate, Username: channelInfo.Username}
+		result = &MsCache{Time: time.Now(), Cate: params.Cate, Username: channelInfo.Username}
+		result.setMes(ms)
 		if freshReq {
 			// 首页列表/搜索: 缓存一切非空结果（含不足一页的末尾页), 结合短 TTL 命中
 			if len(ms) > 0 {
@@ -1036,22 +1060,20 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 func (infos *Infos) refreshMs(client *telegram.Client, version int64, params HandleMs, msCache *MsCache) (src telegram.NewMessage, err error) {
 	debug := infos.Conf.Load().DeBUG
 
-	// 快速路径：版本已变化, 说明其它协程已完成刷新, 直接复用其结果
-	infos.Mutex.RLock()
+	// 快速路径：版本已变化, 说明其它协程已完成刷新, 直接复用其结果。
+	// Version 与 Mes 均为原子操作且写入方先存快照再递增版本, 顺序一致保证读到新版本时必能读到新快照
 	if version != msCache.Version.Load() {
-		if len(msCache.Mes) > 0 {
-			src = msCache.Mes[0]
-			infos.Mutex.RUnlock()
+		cur := msCache.load()
+		if len(cur) > 0 {
+			src = cur[0]
 			if debug {
 				log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mids=%v, name=%s, version=%d, newVersion=%d", params.CID, params.MIDs, src.File.Name, version, msCache.Version.Load())
 			}
 			return src, nil
 		}
-		infos.Mutex.RUnlock()
 		log.Printf("文件引用已刷新, 但未获取到消息, cid=%d, mids=%v, version=%d, newVersion=%d", params.CID, params.MIDs, version, msCache.Version.Load())
 		return src, errors.New("未获取到消息")
 	}
-	infos.Mutex.RUnlock()
 
 	// 网络 IO 不持有全局锁, 避免阻塞其它所有依赖 infos.Mutex 的操作
 	ms, err := client.GetMessages(params.CID, &telegram.SearchOption{
@@ -1089,15 +1111,15 @@ func (infos *Infos) refreshMs(client *telegram.Client, version int64, params Han
 	infos.Mutex.Lock()
 	defer infos.Mutex.Unlock()
 	if version != msCache.Version.Load() {
-		if len(msCache.Mes) > 0 {
-			src = msCache.Mes[0]
+		if cur := msCache.load(); len(cur) > 0 {
+			src = cur[0]
 			if debug {
 				log.Printf("文件引用已刷新, 直接使用新版本, cid=%d, mids=%v, name=%s, version=%d, newVersion=%d", params.CID, params.MIDs, src.File.Name, version, msCache.Version.Load())
 			}
 		}
 		return src, nil
 	}
-	msCache.Mes = ms
+	msCache.setMes(ms)
 	msCache.Time = time.Now()
 	msCache.Version.Add(1)
 	if debug {
@@ -1194,13 +1216,17 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 }
 
 // handleComments 处理评论消息，返回评论消息列表
+// base 是调用方从 msCache.load() 取到的只读快照; 若需要追加评论, 会在内部先做一次拷贝,
+// 绝不在共享快照的底层数组上 append。返回值 ms 可能与 base 同底（无评论场景, 零拷贝）,
+// 也可能是追加了评论的新切片。
 // limit 为本次希望拉取的评论条数（对应 HTTP 请求的分页大小), hasMore 表示 Telegram 一侧是否还有更多评论未拉取,
 // 由"实际拉取到的原始评论条数是否达到 limit"判断——不能用追加到 ms 后的条数判断, 因为其中非媒体消息会被过滤掉。
 // page 的续传方式对齐 search()：offset==0 时按 "comments|mid|page" 查缓存拿到真实游标，
 // 不在缓存里且 page>1 说明跳页请求，直接报错（不能像 page=1 那样从头拉取）
-func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]telegram.NewMessage) (hasMore bool, err error) {
-	if len(*ms) == 0 {
-		return false, errors.New("未找到消息")
+func (infos *Infos) handleComments(mid, offset int32, page, limit int, base []telegram.NewMessage) (ms []telegram.NewMessage, hasMore bool, err error) {
+	ms = base
+	if len(ms) == 0 {
+		return ms, false, errors.New("未找到消息")
 	}
 	if limit <= 0 {
 		limit = 100
@@ -1210,11 +1236,11 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 		key := fmt.Sprintf("comments|%d|%d", mid, page)
 		offset = handleOffset("get", key, offset)
 		if page > 1 && offset == 0 {
-			return false, errors.New("未找到匹配消息")
+			return ms, false, errors.New("未找到匹配消息")
 		}
 	}
 
-	src := (*ms)[0]
+	src := ms[0]
 	if src.Message.Replies != nil && src.Message.Replies.ChannelID != 0 {
 		discussionID := src.Message.Replies.ChannelID
 		username := src.Channel.Username
@@ -1224,7 +1250,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 		channelInfo, err := infos.handleChannel(username)
 		if err != nil {
 			log.Printf("获取频道失败: %+v", err)
-			return false, err
+			return ms, false, err
 		}
 		if channelInfo.Hash == 0 && src.Channel.AccessHash != 0 {
 			channelInfo.Hash = src.Channel.AccessHash
@@ -1254,7 +1280,7 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 				}
 			}()
 			log.Printf("获取评论消息失败: cid=%d, mid=%d, err=%v", src.Channel.ID, mid, err)
-			return false, err
+			return ms, false, err
 		}
 
 		// 从 MessagesGetReplies 的结果中提取原始消息列表和随附的 Chats。
@@ -1290,7 +1316,9 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 
 		// PackMessages 将 []telegram.Message 转为 []*telegram.NewMessage；
 		// 上面已注册频道缓存，这里再兜底纠正一次 Channel(此前误写为 Chat.ID，对 item.CID 无效果)
-		startLen := len(*ms)
+		// base 快照是共享只读的, 追加前必须拷贝出私有副本, 避免并发写者落在同槽位上竞争
+		startLen := len(ms)
+		ms = append([]telegram.NewMessage(nil), ms...)
 		for _, nm := range telegram.PackMessages(client, newMs) {
 			if !nm.IsMedia() {
 				continue
@@ -1306,21 +1334,21 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, ms *[]tel
 					nm.Channel.AccessHash = src.Channel.AccessHash
 				}
 			}
-			*ms = append(*ms, *nm)
+			ms = append(ms, *nm)
 		}
 
 		// 记录下一页的续传游标, 供下次 page+1 请求时通过 handleOffset("get", ...) 取回，
 		// 跟 search() 里 "page -> offset" 的续传方式保持一致
-		if hasMore && len(*ms) > startLen {
+		if hasMore && len(ms) > startLen {
 			key := fmt.Sprintf("comments|%d|%d", mid, page+1)
-			handleOffset("set", key, (*ms)[len(*ms)-1].ID)
+			handleOffset("set", key, ms[len(ms)-1].ID)
 		}
 	}
-	return hasMore, nil
+	return ms, hasMore, nil
 }
 
 // handleLinks 处理消息媒体, 返回直链
-func handleLinks(res HackLink, item Item) (link string) {
+func handleLinks(res HackLink, item Item) (link string, err error) {
 	conf := infos.Conf.Load()
 	link = fmt.Sprintf("%s/stream?cid=%v&mid=%d&cate=user", strings.TrimSuffix(conf.Site, "/"), item.CID, item.MID)
 	if item.Username != "" {
@@ -1329,6 +1357,12 @@ func handleLinks(res HackLink, item Item) (link string) {
 
 	if conf.Password != "" {
 		if res.M != nil {
+			// 开启密码保护时链接需要携带发送者的 hash/uid 鉴权,
+			// 频道帖子没有个人发送者(SenderID 为 0), 无法生成有效直链;
+			// 不能回退用管理员 UID, 否则等于把管理员 ID 泄露给链接接收方
+			if res.M.SenderID() == 0 {
+				return "", errors.New("消息没有个人发送者, 无法生成带鉴权的直链")
+			}
 			link += fmt.Sprintf("&hash=%s&uid=%d", infos.calculateHash(res.M.SenderID()), res.M.SenderID())
 		} else {
 			switch {
@@ -1341,7 +1375,7 @@ func handleLinks(res HackLink, item Item) (link string) {
 			}
 		}
 	}
-	return link
+	return link, nil
 }
 
 // handleItem 处理消息媒体, 返回 Item

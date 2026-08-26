@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"html"
 	"log"
@@ -25,7 +26,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 	conf := infos.Conf.Load()
 
 	// 拦截非管理指令并匹配正则过滤规则 [FEAT-002]
-	if !m.IsMedia() && text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "http") && m.SenderID() != 0 && !infos.isWhite(m.SenderID()) {
+	// 仅在群组/频道中生效: 私聊里 bot 无权删除用户消息, 且不应干预用户与 bot 的正常对话
+	if !m.IsMedia() && text != "" && !strings.HasPrefix(text, "/") && !strings.HasPrefix(text, "http") && m.SenderID() != 0 && !infos.isWhite(m.SenderID()) && (m.IsGroup() || m.IsChannel()) {
 		infos.Mutex.RLock()
 		rexRules := infos.RexRules
 		infos.Mutex.RUnlock()
@@ -761,6 +763,13 @@ func handleBotCommand(m *telegram.NewMessage) error {
 func handleMess(m *telegram.NewMessage) error {
 	// 如果是用户发送或转发来的、带有图片/文档/视频的消息，直接生成直链
 	if m.IsMedia() && (m.Photo() != nil || m.Document() != nil || m.Video() != nil) {
+		// 开启密码保护时链接需要携带发送者的 hash/uid 鉴权,
+		// 频道帖子没有个人发送者(SenderID 为 0), 无法生成有效直链;
+		// 不能回退用管理员 UID, 否则等于把管理员 ID 泄露给链接接收方
+		if infos.Conf.Load().Password != "" && m.SenderID() == 0 {
+			sendMS(m, "频道帖子没有个人发送者, 无法生成带鉴权的直链", nil, 60)
+			return nil
+		}
 		link := fmt.Sprintf("%s/stream?cid=%d&mid=%d&cate=bot", strings.TrimSuffix(infos.Conf.Load().Site, "/"), m.ChatID(), m.ID)
 		if m.Channel != nil && m.Channel.Username != "" {
 			link += fmt.Sprintf("&cname=%s", m.Channel.Username)
@@ -788,19 +797,41 @@ func handleMess(m *telegram.NewMessage) error {
 		return nil
 	}
 	res := HackLink{
-		M:       m,
-		Matches: matches,
+		M: m,
 	}
-	items, err := hackLinks(res)
-	if err != nil {
-		return err
+	var items []Item
+	var errs error
+	for _, match := range matches {
+		res.Match = match
+		result, err := hackLinks(res)
+		if err != nil {
+			errs = errors.Join(errs, err)
+			continue
+		}
+		items = append(items, result...)
+	}
+
+	// 全部失败时单独告知原因; 部分成功时错误已单独回复, 成功的链接仍继续下发,
+	// 不能因为存在个别失败就把全部成功结果一并丢弃
+	if errs != nil {
+		if _, err := m.Reply(errs.Error()); err != nil {
+			log.Printf("发送消息失败: %+v", err)
+		}
 	}
 	if len(items) == 0 {
 		return nil
 	}
 	links := make([]string, 0, len(items))
 	for _, item := range items {
-		links = append(links, handleLinks(res, item))
+		link, err := handleLinks(res, item)
+		if err != nil {
+			log.Printf("生成直链失败: cid=%d, mid=%d, err=%+v", item.CID, item.MID, err)
+			continue
+		}
+		links = append(links, link)
+	}
+	if len(links) == 0 {
+		return nil
 	}
 	if err := sendLink(m, links); err != nil {
 		log.Printf("发送消息失败: %+v", err)
@@ -817,9 +848,9 @@ func sendLink(m *telegram.NewMessage, links []string) error {
 	if len(links) == 1 {
 		link := links[0]
 		text := fmt.Sprintf("<b>🔗 链接提取成功</b>\n\n<code>%s</code>\n\n👆 <i>上方链接复制, 下方按钮下载</i> 👇", html.EscapeString(link))
-		markup := telegram.InlineURL(
-			"🚀 直接下载", fmt.Sprintf("%s&download=true", link),
-		)
+		markup := telegram.NewKeyboard().AddRow(
+			telegram.Button.URL("🚀 直接下载", fmt.Sprintf("%s&download=true", link)),
+		).Build()
 
 		_, err := m.Reply(text, &telegram.SendOptions{
 			ParseMode:   "html",

@@ -57,13 +57,13 @@ type LatestGroup struct {
 
 // HackLink 结构体用于在处理提取链接时传递中间数据
 type HackLink struct {
-	M       *telegram.NewMessage // 原始消息对象
-	Ctx     context.Context      // 上下文
-	Offset  int32                // 偏移量
-	UID     int64                // 发起请求的用户 ID
-	Pass    string               // 可选密码
-	Hash    string               // 验证哈希
-	Matches [][]string           // 正则匹配到的链接信息
+	M      *telegram.NewMessage // 原始消息对象
+	Ctx    context.Context      // 上下文
+	Offset int32                // 偏移量
+	UID    int64                // 发起请求的用户 ID
+	Pass   string               // 可选密码
+	Hash   string               // 验证哈希
+	Match  []string             // 单条 t.me 链接的正则匹配结果（telegramLinkRe 的一个 submatch）
 }
 
 type HandleMs struct {
@@ -108,23 +108,30 @@ type MediaCache struct {
 }
 
 type MsCache struct {
-	Mes      []telegram.NewMessage
+	Mes      atomic.Pointer[[]telegram.NewMessage] // 不可变消息快照, 更新时整体替换指针（写时拷贝）, 读者无锁直读
 	Username string
 	Cate     string
 	Time     time.Time
 	Version  atomic.Int64
 }
 
-// load 在持有 infos.Mutex 读锁的情况下安全地取出当前消息列表，并返回一份
-// 防御性拷贝。msCache 一旦被写入 infos.MsCache 就可能被并发的多个请求共享；
-// refreshMs 以及流式下载完成后的缓存回写都会在持锁状态下重新赋值 Mes 字段。
-// 因此所有读取都必须走这里，而不是直接 msCache.Mes（否则可能读到撕裂的 slice header）。
-// 拷贝使调用方对返回切片做 append（如 handleComments 追加评论消息）时，
-// 不会把数据写进缓存共享的底层数组，避免并发 append 同槽位的数据竞争。
+// load 返回当前消息快照。快照一经发布就不会再被原地修改——所有写入方都在持有
+// infos.Mutex 的情况下用 setMes 整体替换指针, 而 atomic 的加载/存储是顺序一致的,
+// 因此读者无需加锁即可拿到完整的新快照或完整的旧快照。
+// 返回的切片与缓存共享底层数组且视为只读: 调用方不得对其 append 或修改元素
+// （append 可能写入共享数组的空闲槽位, 与其他并发读者竞争）; 需要变更时先自行拷贝,
+// 见 handleComments（唯一需要追加评论消息的场景）
 func (msCache *MsCache) load() []telegram.NewMessage {
-	infos.Mutex.RLock()
-	defer infos.Mutex.RUnlock()
-	return append([]telegram.NewMessage(nil), msCache.Mes...)
+	if ms := msCache.Mes.Load(); ms != nil {
+		return *ms
+	}
+	return nil
+}
+
+// setMes 以写时拷贝的方式替换整个消息快照。调用方必须已持有 infos.Mutex,
+// 保证同一缓存的 Time/Version 等字段的更新互斥
+func (msCache *MsCache) setMes(ms []telegram.NewMessage) {
+	msCache.Mes.Store(&ms)
 }
 
 type Item struct {
@@ -199,6 +206,7 @@ type Infos struct {
 	Cond         *sync.Cond                      // 条件变量, 用于搜索并发限流等待（独立锁, 不与 Mutex 共用）
 	Conf         atomic.Pointer[Conf]            // 全局配置快照, 原子指针支持无锁并发读；更新走 refreshConf（写时拷贝）
 	ConfMu       *sync.Mutex                     // 序列化配置更新, 避免并发管理员命令互相覆盖对方的修改
+	LoMu         *sync.Mutex                     // 序列化 UserBot 登录流程, 覆盖从发起登录到后台 Login 结束的完整窗口, 防止并发 /phone、/qr 同时发起多个 Login
 	File         *os.File                        // 日志文件句柄
 	Rex          *regexp.Regexp                  // 用于解析 Telegram FloodWait 错误的正则
 	RexRules     []*regexp.Regexp                // 预编译的群管正则规则缓存
@@ -237,7 +245,7 @@ var infos *Infos
 var offSets *OffSets
 var startTime time.Time
 var searchCount atomic.Int64
-var version = "v1.1.4"
+var version = "v1.1.5"
 
 // main 是程序的入口函数
 func main() {
@@ -380,14 +388,14 @@ func newInfos(filePath, filesPath string) (*Infos, error) {
 	maxMedia := 4
 	mutex := new(sync.RWMutex)
 	infos := &Infos{
-		MaxMs:      maxChannel * 16,
-		MaxChannel: maxChannel,
-		MaxMedia:   maxMedia,
-		FilePath:   filePath,
-		FilesPath:  filesPath,
-		Mutex:      mutex,
-		ConfMu:     new(sync.Mutex),
-		// Cond 使用独立的 Mutex, 避免搜索限流的 Wait/Broadcast 与 infos.Mutex 上其他无关操作互相阻塞
+		MaxMs:        maxChannel * 16,
+		MaxChannel:   maxChannel,
+		MaxMedia:     maxMedia,
+		FilePath:     filePath,
+		FilesPath:    filesPath,
+		Mutex:        mutex,
+		ConfMu:       new(sync.Mutex),
+		LoMu:         new(sync.Mutex),
 		Cond:         sync.NewCond(new(sync.Mutex)),
 		Code:         make(chan string, 1),
 		Pass:         make(chan string, 1),

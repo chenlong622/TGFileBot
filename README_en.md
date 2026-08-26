@@ -250,6 +250,7 @@ Core download interface, supports HTTP Range requests, enabling drag-and-play in
 
 **Features**:
 - Supports HTTP Range requests (206 Partial Content)
+- Returns `416 Requested Range Not Satisfiable` per RFC 7233 when the Range start lies beyond EOF
 - If the message is a forwarded message, it automatically parses the source channel and redirects, ensuring stable chunk downloading
 - Automatically handles file reference expiration with seamless resumption
 
@@ -606,6 +607,8 @@ White (Whitelist user, basic access only)
 3. Check if the specified DC is available, try `/dc 2` or `/dc 4` to switch.
 4. View log output `tail -f files/log.log` for specific error messages.
 
+> 💡 If the account has Two-Step Verification (2FA) enabled, QR login is unavailable (a Telegram limitation); the program will prompt you to log in via `/phone <number>` instead.
+
 **Solution**:
 ```bash
 # Clear cache and session files
@@ -835,7 +838,18 @@ This project is licensed under the [Apache 2.0](LICENSE) License.
 
 ## Changelog
 
-### v1.1.4 (Current Version)
+### v1.1.5
+- ✅ Fixed multi-link extraction keeping only the last result; each link is now resolved independently
+- ✅ Stream downloads now abort with proper error logs when a chunk fails, instead of silently truncating the response per Content-Length
+- ✅ Fixed a nil pointer crash during QR login for accounts with 2FA enabled; now guides users to `/phone` login instead
+- ✅ Login flows are serialized with a lock, so concurrent `/phone` and `/qr` commands no longer start multiple logins at once
+- ✅ Group management regex rules now only apply in groups/channels and no longer affect private chats
+- ✅ API `limit` parameter is now capped at 100 (excess values are clamped), negative `offset`/`mid` are rejected
+- ✅ HTTP Range requests whose start lies beyond EOF now return `416` per RFC 7233
+- ✅ Message cache switched to lock-free immutable snapshots (copy-on-write), reducing allocations and lock contention under high concurrency
+- ✅ With password auth enabled, channel posts without an individual sender no longer produce dead direct links (they are skipped with an explicit error instead)
+
+### v1.1.4
 - ✅ Enhanced concurrent download stability
 - ✅ Optimized cache management strategies
 - ✅ Improved error handling and logging

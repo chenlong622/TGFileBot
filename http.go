@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -140,14 +141,22 @@ func handleParams(r *http.Request) (result Params, err error) {
 	}
 	result.Page = page
 
+	// 上限对齐 Telegram 单次消息拉取的合理边界, 防止 limit=10000 之类的请求直接打爆 API 触发 FloodWait
+	const maxLimit = 100
+
 	limit, err := strconv.Atoi(params.Get("limit"))
 	if err != nil || limit <= 0 {
 		limit = 20
+	} else if limit > maxLimit {
+		limit = maxLimit
 	}
 	result.Limit = int(limit)
 
-	// ParseInt 出错时返回值已经是 0, 无需再显式判断赋值
+	// ParseInt 出错时返回值已经是 0, 无需再显式判断赋值; 负值视为未提供, 避免 GetMessages 收到非法偏移
 	offset, _ := strconv.ParseInt(params.Get("offset"), 10, 32)
+	if offset < 0 {
+		offset = 0
+	}
 	result.Offset = int32(offset)
 
 	cid, err := strconv.ParseInt(params.Get("cid"), 10, 64)
@@ -167,7 +176,7 @@ func handleParams(r *http.Request) (result Params, err error) {
 	result.UID = uid
 
 	mid, err := strconv.ParseInt(params.Get("mid"), 10, 32)
-	if err != nil || mid == 0 {
+	if err != nil || mid <= 0 {
 		matches := streamPathRe.FindStringSubmatch(r.URL.Path)
 		if len(matches) == 2 {
 			mid, err = strconv.ParseInt(matches[1], 10, 32)
@@ -187,16 +196,19 @@ func handleParams(r *http.Request) (result Params, err error) {
 	return result, nil
 }
 
-// handleRanHeader 解析 HTTP Range 头
-func handleRanHeader(src string, size int64) (start, end int64) {
+// handleRanHeader 解析 HTTP Range 头, 返回解析后的区间。
+// ok 为 false 表示区间语法合法但起点已超出文件末尾（如 bytes=A- 且 A >= size）,
+// 按 RFC 7233 调用方应返回 416 并携带 Content-Range: bytes */size;
+// 语法非法的 Range 则宽容地按整段读取处理（RFC 允许忽略非法 Range）
+func handleRanHeader(src string, size int64) (start, end int64, ok bool) {
 	if src == "" {
-		return 0, size - 1
+		return 0, size - 1, true
 	}
 	src = strings.TrimSpace(strings.TrimPrefix(src, "bytes="))
 
 	// 快速路径: bytes=0- 是最常见的整段读取请求, 免去拆分与整数解析
 	if src == "0-" && size > 0 {
-		return 0, size - 1
+		return 0, size - 1, true
 	}
 
 	parts := strings.SplitN(src, "-", 2)
@@ -217,7 +229,11 @@ func handleRanHeader(src string, size int64) (start, end int64) {
 		}
 	} else {
 		// bytes=A-B 或 bytes=A-
-		if n, err := strconv.ParseInt(parts[0], 10, 64); err == nil {
+		if n, err := strconv.ParseInt(parts[0], 10, 64); err == nil && n >= 0 {
+			if n >= size {
+				// 区间起点超出文件末尾: 无法满足, 返回 416 而不是退化为最后 1 字节
+				return n, size - 1, false
+			}
 			start = n
 		}
 		end = size - 1
@@ -233,7 +249,13 @@ func handleRanHeader(src string, size int64) (start, end int64) {
 	if start > end {
 		start = end
 	}
-	return start, end
+	return start, end, true
+}
+
+// write416 按 RFC 7233 返回 416 响应, 必须在 WriteHeader 前设置 Content-Range
+func write416(w http.ResponseWriter, size int64) {
+	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+	http.Error(w, "请求范围不合法", http.StatusRequestedRangeNotSatisfiable)
 }
 
 func handlePic(w http.ResponseWriter, r *http.Request) {
@@ -414,26 +436,73 @@ func handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	conf := infos.Conf.Load()
+	lenChannels := len(params.Channels)
+	lenFilters := len(params.Filters)
+
+	// 与 handleSearch 一致的并发限流: 多频道并行拉取列表会成倍放大 Telegram API 压力,
+	// 复用同一份 searchCount 预算, 使 /list 与 /search 的总并发共同受 workers 约束
+	maxCount := int64(2 * conf.Workers)
+	if maxCount == 0 {
+		maxCount = 3
+	}
+
+	// 按索引写入各自槽位（不同 goroutine 写不同下标, 无数据竞争）,
+	// 全部完成后按下标重组, 保证响应中频道的顺序与请求参数一致
+	type channelResult struct {
+		item Items
+		ok   bool
+	}
+	results := make([]channelResult, lenChannels)
+	var workerPool sync.WaitGroup
+
+	for num, channel := range params.Channels {
+		infos.Cond.L.Lock()
+		for searchCount.Load() >= maxCount {
+			infos.Cond.Wait()
+		}
+		searchCount.Add(1)
+		infos.Cond.L.Unlock()
+
+		workerPool.Add(1)
+		go func(num int, channel string) {
+			defer func() {
+				workerPool.Done()
+				searchCount.Add(-1)
+				infos.Cond.L.Lock()
+				infos.Cond.Broadcast()
+				infos.Cond.L.Unlock()
+			}()
+
+			// 过滤器与频道按位置一一对应（保持 /list 原有语义, 与 /search 的单值通配不同）
+			filter := int64(0)
+			if num < lenFilters {
+				filter = params.Filters[num]
+			}
+
+			item, err := infos.list(channel, params.Page, params.Limit, params.Offset, filter, params.Reverse, r.Context())
+			if err != nil {
+				log.Printf("获取频道 %s 的文件列表失败: %+v", channel, err)
+				return
+			}
+			results[num] = channelResult{item: item, ok: true}
+		}(num, channel)
+	}
+	workerPool.Wait()
+
 	var items struct {
 		HasMore bool    `json:"more"`
 		Items   []Items `json:"items"`
 	}
-	items.Items = make([]Items, 0, len(params.Channels))
-	lenFilters := len(params.Filters)
-	for num, channel := range params.Channels {
-		filter := int64(0)
-		if num < lenFilters {
-			filter = params.Filters[num]
-		}
-		item, err := infos.list(channel, params.Page, params.Limit, params.Offset, filter, params.Reverse, r.Context())
-		if err != nil {
-			log.Printf("获取频道 %s 的文件列表失败: %+v", channel, err)
+	items.Items = make([]Items, 0, lenChannels)
+	for _, result := range results {
+		if !result.ok {
 			continue
 		}
 		if !items.HasMore {
-			items.HasMore = item.HasMore
+			items.HasMore = result.item.HasMore
 		}
-		items.Items = append(items.Items, item)
+		items.Items = append(items.Items, result.item)
 	}
 	content, err := json.Marshal(items)
 	if err != nil {
@@ -468,26 +537,34 @@ func handleLink(w http.ResponseWriter, r *http.Request) {
 	clientIP := handleClientIP(r)
 	log.Printf("正在处理来自 %s 的请求, 开始提取直链, link=%s", clientIP, src)
 
-	// 3. 正则匹配并解析链接
-	res.Matches = telegramLinkRe.FindAllStringSubmatch(src, -1)
+	// 3. 正则匹配并解析链接, 逐条提取, 单条失败不影响其余链接
 	res.UID = params.UID
 	res.Pass = params.Pass
 	res.Hash = params.Hash
 	res.Offset = params.Offset
 
-	items, err := hackLinks(res)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	results := make([]Item, 0)
+	for _, match := range telegramLinkRe.FindAllStringSubmatch(src, -1) {
+		res.Match = match
+		items, err := hackLinks(res)
+		if err != nil {
+			log.Printf("提取直链失败: %+v", err)
+			continue
+		}
+		if len(items) == 0 {
+			continue
+		}
+		results = append(results, items...)
 	}
-	if len(items) == 0 {
+
+	if len(results) == 0 {
 		http.Error(w, "未找到可下载的媒体", http.StatusNotFound)
 		return
 	}
 
-	sortItems(items, params.Reverse)
+	sortItems(results, params.Reverse)
 
-	result, err := json.Marshal(items)
+	result, err := json.Marshal(results)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -615,7 +692,11 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		// 与大文件分支一致地解析 Range 头, 避免小文件分支明明声明了 Accept-Ranges 却始终整体返回 200,
 		// 导致播放器/下载工具的 seek、断点续传在小文件上失效
 		ranHeader := r.Header.Get("Range")
-		start, end := handleRanHeader(ranHeader, size)
+		start, end, rangeOK := handleRanHeader(ranHeader, size)
+		if !rangeOK {
+			write416(w, size)
+			return
+		}
 
 		// HEAD 请求只需要头部信息, 文件大小已从消息元数据中获知, 无需真的向 Telegram 发起下载。
 		// 带 Range 时须返回 206, 与下方大文件分支保持一致, 否则断点续传/seek 探测会误判
@@ -650,8 +731,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			// 下载到的内容以实际大小为准做边界保护, 防止 Telegram 返回的字节数与消息元数据里的 size 有出入导致越界。
 			// 实际内容为空时按 RFC 返回 416, 避免负下标/越界切片导致 panic 或响应退化
 			if len(content) == 0 {
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
-				http.Error(w, "请求范围不合法", http.StatusRequestedRangeNotSatisfiable)
+				write416(w, size)
 				return
 			}
 			rangeStart, rangeEnd := start, end
@@ -689,7 +769,12 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 		// 7. 处理 HTTP Range 请求（分段读取的核心逻辑）
 		ranHeader := r.Header.Get("Range")
-		start, end := handleRanHeader(ranHeader, size)
+		start, end, rangeOK := handleRanHeader(ranHeader, size)
+		// 必须在写出任何响应头之前判定, 否则 416 无法替换已发送的 206
+		if !rangeOK {
+			write416(w, size)
+			return
+		}
 
 		if ranHeader == "" {
 			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
@@ -723,13 +808,13 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			if stream.Version.Load() > 0 {
 				// stream.Ms 由 stream.refresh() 在 stream.Mutex 保护下并发写入
 				// （下载协程可能在客户端已断开、本函数已经在准备 return 时仍在后台刷新引用），
-				// 这里必须持同一把锁读取，否则可能读到撕裂的 slice header 并写入共享缓存 msCache.Mes
+				// 这里必须持同一把锁读取，否则可能读到撕裂的 slice header
 				stream.Mutex.Lock()
 				ms := stream.Ms
 				stream.Mutex.Unlock()
 
 				infos.Mutex.Lock()
-				msCache.Mes = ms
+				msCache.setMes(ms)
 				msCache.Time = time.Now()
 				msCache.Version.Add(1)
 				infos.Mutex.Unlock()
@@ -766,11 +851,10 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 					}
 					return
 				case task := <-stream.Tasks:
-					// 读取一个下载好的分片任务; stream.Tasks 从不 close()/发送 nil, 无需判空
-					if task.Error != nil {
-						log.Printf("切片下载出错: cid=%d, mid=%d, start=%d, end=%d, name=%s, error=%+v", params.CID, params.MID, task.ContentStart, task.ContentEnd, fileName, task.Error)
-						return
-					}
+					// 读取一个下载好的分片任务; stream.Tasks 从不 close()/发送 nil, 无需判空。
+					// 注意此处不读 task.Error: worker 总是先推入通道再下载,
+					// 此刻 Error 必为 nil, 而其后续写入与本处读取无同步关系;
+					// 真正的错误判定统一放在下方通道关闭(!ok)分支, 该处有 close 建立的 happens-before 保证
 					// 等待任务完成或者客户端断开。
 					// 弹出任务后立刻用自适应超时重新计时：等待区间须覆盖该分片完整的
 					// 下载耗时（含重试与 FloodWait）, 否则分片仍在推进时会被误判为超时截断响应
@@ -786,6 +870,14 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 						return
 					case content, ok := <-task.Content:
 						if !ok {
+							// 通道关闭有两种可能: 正常完成, 或 worker 下载失败后先设置 task.Error
+							// 再 close(task.Content)。Go 内存模型保证 close 先于"读到零值",
+							// 因此此刻读取 task.Error 是安全的。失败时必须中止响应并如实记录,
+							// 否则会按已声明的 Content-Length 静默截断文件, 日志还误报"已完成"
+							if err := task.Error; err != nil {
+								log.Printf("切片下载出错: cid=%d, mid=%d, start=%d, end=%d, name=%s, error=%+v", params.CID, params.MID, task.ContentStart, task.ContentEnd, fileName, err)
+								return
+							}
 							if infos.Conf.Load().DeBUG {
 								log.Printf("流式传输文件已完成: cid=%d, mid=%d, name=%s", params.CID, params.MID, fileName)
 							}
@@ -1101,7 +1193,7 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "未获取到消息", http.StatusNotFound)
 		return
 	}
-	hasMore, err := infos.handleComments(params.MID, params.Offset, params.Page, params.Limit, &ms)
+	ms, hasMore, err := infos.handleComments(params.MID, params.Offset, params.Page, params.Limit, ms)
 	if err != nil {
 		http.Error(w, "获取评论失败", http.StatusInternalServerError)
 		return
@@ -1155,145 +1247,129 @@ func handleComments(w http.ResponseWriter, r *http.Request) {
 
 }
 
+// mediaMimes 视频文件扩展名（小写, 含点）到 MIME 类型的映射。
+// 不用 mime.TypeByExtension 是因为其内置表跨平台不一致（Windows 还会读注册表）,
+// 且缺少 mkv/ts 等容器类型, 无法保证各平台返回与这里完全一致的映射
+var mediaMimes = map[string]string{
+	".webm": "video/webm",
+	".avi":  "video/x-msvideo",
+	".wmv":  "video/x-ms-wmv",
+	".flv":  "video/x-flv",
+	".mov":  "video/quicktime",
+	".mkv":  "video/x-matroska",
+	".ts":   "video/mp2t",
+	".mpeg": "video/mpeg",
+	".mpg":  "video/mpeg",
+	".3gpp": "video/3gpp",
+	".3gp":  "video/3gpp",
+	".mp4":  "video/mp4",
+	".m4s":  "video/mp4",
+}
+
 // handleMediaCate 根据文件扩展名返回对应的 MIME 类型
 func handleMediaCate(fileName string) string {
-	lowerFileName := strings.ToLower(fileName)
-	switch {
-	case strings.HasSuffix(lowerFileName, ".webm"):
-		return "video/webm"
-	case strings.HasSuffix(lowerFileName, ".avi"):
-		return "video/x-msvideo"
-	case strings.HasSuffix(lowerFileName, ".wmv"):
-		return "video/x-ms-wmv"
-	case strings.HasSuffix(lowerFileName, ".flv"):
-		return "video/x-flv"
-	case strings.HasSuffix(lowerFileName, ".mov"):
-		return "video/quicktime"
-	case strings.HasSuffix(lowerFileName, ".mkv"):
-		return "video/x-matroska"
-	case strings.HasSuffix(lowerFileName, ".ts"):
-		return "video/mp2t"
-	case strings.HasSuffix(lowerFileName, ".mpeg"), strings.HasSuffix(lowerFileName, ".mpg"):
-		return "video/mpeg"
-	case strings.HasSuffix(lowerFileName, ".3gpp"), strings.HasSuffix(lowerFileName, ".3gp"):
-		return "video/3gpp"
-	case strings.HasSuffix(lowerFileName, ".mp4"), strings.HasSuffix(lowerFileName, ".m4s"):
-		return "video/mp4"
-	default:
-		return "application/octet-stream"
+	if cate, ok := mediaMimes[strings.ToLower(filepath.Ext(fileName))]; ok {
+		return cate
 	}
+	return "application/octet-stream"
 }
 
 // hackLinks 是链接解析的核心逻辑，负责将 t.me 链接映射到具体的媒体消息并生成本程序的流地址
-func hackLinks(res HackLink) (items []Item, errs error) {
-	for _, match := range res.Matches {
-		var username string
-		var cid int64 // 用于 ResolvePeer 的标识项
-		var mid int32 // 消息 ID
+func hackLinks(res HackLink) (items []Item, err error) {
+	var username string
+	var cid int64 // 用于 ResolvePeer 的标识项
+	var mid int32 // 消息 ID
 
-		// 1. 解析 Chat ID 或 Username
-		if match[2] != "" {
-			// 如果是 c/(\d+)，代表私有频道链接，需要给 ID 补充前缀 -100
-			value, err := strconv.ParseInt("-100"+match[2], 10, 64)
-			if err != nil {
-				log.Printf("解析频道ID失败: %+v", err)
-				if res.M != nil {
-					if _, err := res.M.Reply("解析频道ID失败"); err != nil {
-						log.Printf("发送消息失败: %+v", err)
-					}
+	match := res.Match
+	// 1. 解析 Chat ID 或 Username
+	if match[2] != "" {
+		// 如果是 c/(\d+)，代表私有频道链接，需要给 ID 补充前缀 -100
+		value, err := strconv.ParseInt("-100"+match[2], 10, 64)
+		if err != nil {
+			log.Printf("解析频道ID失败: %+v", err)
+			if res.M != nil {
+				if _, err := res.M.Reply("解析频道ID失败"); err != nil {
+					log.Printf("发送消息失败: %+v", err)
 				}
-				continue
 			}
-			cid = value
+			return items, err
+		}
+		cid = value
+	} else {
+		// 否则匹配的是公开频道的 username
+		channelInfo, err := infos.handleChannel(match[3])
+		if err != nil {
+			log.Printf("获取频道 %s 信息失败: %+v", match[3], err)
+			return items, err
+		}
+		cid = channelInfo.CID
+		username = channelInfo.UserName
+	}
+
+	// 2. 解析消息偏移 ID
+	value, err := strconv.ParseInt(match[4], 10, 32)
+	if err != nil {
+		log.Printf("解析消息ID失败: %+v", err)
+		return items, err
+	}
+
+	mid = int32(value)
+
+	// 3. 使用 UserBot 客户端尝试获取目标消息
+	param := HandleMs{
+		CID:    cid,
+		CNames: []string{username},
+		MIDs:   []int32{mid},
+		Ctx:    res.Ctx,
+		Cate:   "user",
+		Limit:  1,
+	}
+
+	msCache, err := infos.handleMs(param)
+	if err != nil {
+		log.Printf("获取消息失败: cid=%v, mid=%d, err=%+v", cid, mid, err)
+		return items, err
+	}
+	ms := msCache.load()
+
+	if len(ms) == 0 {
+		log.Printf("未获取到消息: cid=%v, mid=%d", cid, mid)
+		err = errors.New("未获取到消息")
+		return items, err
+	}
+
+	// 4. 处理链接中的评论 (comment) 逻辑
+	if match[5] != "" {
+		ms, _, err = infos.handleComments(mid, res.Offset, 1, 0, ms)
+		if err != nil {
+			log.Printf("获取评论失败: cid=%v, mid=%d, err=%+v", cid, mid, err)
+			return items, err
+		}
+	}
+
+	items = make([]Item, 0, len(ms))
+	for _, src := range ms {
+		if src.Message.GroupedID != 0 {
+			medias, err := src.GetMediaGroup()
+			if err != nil {
+				log.Printf("提取媒体组错误: %+v", err)
+			}
+			for _, media := range medias {
+				items = append(items, handleItem(media))
+			}
 		} else {
-			// 否则匹配的是公开频道的 username
-			channelInfo, err := infos.handleChannel(match[3])
-			if err != nil {
-				log.Printf("获取频道 %s 信息失败: %+v", match[3], err)
+			if !src.IsMedia() {
+				log.Printf("消息不包含媒体: cid=%v, mid=%d", cid, mid)
 				continue
 			}
-			cid = channelInfo.CID
-			username = channelInfo.UserName
-		}
-
-		// 2. 解析消息偏移 ID
-		value, err := strconv.ParseInt(match[4], 10, 32)
-		if err != nil {
-			errs = errors.Join(errs, err)
-			log.Printf("解析消息ID失败: %+v", err)
-			continue
-		}
-
-		mid = int32(value)
-
-		// 3. 使用 UserBot 客户端尝试获取目标消息
-		param := HandleMs{
-			CID:    cid,
-			CNames: []string{username},
-			MIDs:   []int32{mid},
-			Ctx:    res.Ctx,
-			Cate:   "user",
-			Limit:  1,
-		}
-
-		msCache, err := infos.handleMs(param)
-		if err != nil {
-			log.Printf("获取消息失败: cid=%v, mid=%d, err=%+v", cid, mid, err)
-			errs = errors.Join(errs, err)
-			continue
-		}
-		ms := msCache.load()
-
-		if len(ms) == 0 {
-			log.Printf("未获取到消息: cid=%v, mid=%d", cid, mid)
-			err = errors.New("未获取到消息")
-			errs = errors.Join(errs, err)
-			continue
-		}
-
-		// 4. 处理链接中的评论 (comment) 逻辑
-		if match[5] != "" {
-			if _, err := infos.handleComments(mid, res.Offset, 1, 0, &ms); err != nil {
-				log.Printf("获取评论失败: cid=%v, mid=%d, err=%+v", cid, mid, err)
-				errs = errors.Join(errs, err)
-				continue
-			}
-		}
-
-		items = make([]Item, 0, len(ms))
-		for _, src := range ms {
-			if src.Message.GroupedID != 0 {
-				medias, err := src.GetMediaGroup()
-				if err != nil {
-					log.Printf("提取媒体组错误: %+v", err)
-				}
-				for _, media := range medias {
-					items = append(items, handleItem(media))
-				}
-			} else {
-				if !src.IsMedia() {
-					log.Printf("消息不包含媒体: cid=%v, mid=%d", cid, mid)
-					continue
-				}
-				items = append(items, handleItem(src))
-			}
+			items = append(items, handleItem(src))
 		}
 	}
 
 	if len(items) == 0 {
-		errs = errors.Join(errs, errors.New("未获取到有效链接"))
-	}
-
-	if errs != nil && res.M != nil {
-		if _, err := res.M.Reply(errs.Error()); err != nil {
-			log.Printf("发送消息失败: %+v", err)
-		}
-		// 部分匹配成功时, 错误已单独告知, 已解析出的链接必须保留并交由调用方继续下发,
-		// 不能因为存在个别失败就把全部成功结果一并丢弃
-		if len(items) > 0 {
-			return items, nil
-		}
-		return nil, errs
+		err = errors.New("未获取到有效链接")
+		log.Printf("未获取到有效链接: cid=%v, mid=%d", cid, mid)
+		return items, err
 	}
 	return items, nil
 }
