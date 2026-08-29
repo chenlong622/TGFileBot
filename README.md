@@ -245,8 +245,7 @@ docker stop tgfilebot
 | `cate` | 否 | 下载客户端选择：`user`（使用 UserBot，可访问私有频道）或 `bot`（默认）。UserBot 未登录时自动回退到 Bot |
 | `download` | 否 | 设为 `true` 时以附件模式下载（`Content-Disposition: attachment`），否则为内联播放 |
 | `key` | 否* | 明文访问密码（设置了 `password` 时必填其一）|
-| `hash` | 否* | 基于用户 ID 的哈希鉴权（设置了 `password` 时必填其一），需同时提供 `uid` |
-| `uid` | 否* | 使用 `hash` 鉴权时必须提供对应用户 ID |
+| `hash` | 否* | 哈希鉴权（设置了 `password` 时必填其一）|
 
 **特点**:
 - 支持 HTTP Range 请求（206 Partial Content）
@@ -271,7 +270,7 @@ docker stop tgfilebot
 | `cname` | 否 | 频道用户名/别名（如 `@mychannel`），与 `cid` 二选一 |
 | `mid` | 是 | 消息 ID（正整数）|
 | `cate` | 否 | 下载客户端选择：`user`（使用 UserBot）或 `bot`（默认） |
-| `key` / `hash` / `uid` | 否* | 鉴权参数（设置了 `password` 时必填其一）|
+| `key` / `hash` | 否* | 鉴权参数（设置了 `password` 时必填其一）|
 
 > 该接口返回图片格式通常为 `image/jpeg`。若对应的消息没有缩略图，则返回 `404 Not Found`。
 
@@ -283,7 +282,7 @@ docker stop tgfilebot
 
 **URL 格式**:
 ```
-/link?link={TG_LINK}&key={key}&uid={uid}&hash={hash}
+/link?link={TG_LINK}&key={key}&hash={hash}
 ```
 
 | 参数 | 必填 | 说明 |
@@ -291,7 +290,6 @@ docker stop tgfilebot
 | `link` | 是 | 完整的 Telegram 消息链接，格式为 `https://t.me/c/{cid}/{mid}` 或 `https://t.me/{username}/{mid}` |
 | `key` | 否* | 明文访问密码(与hash二选一) |
 | `hash` | 否* | 哈希鉴权(与key二选一) |
-| `uid` | 否* | 使用 `hash` 时对应的用户 ID |
 | `offset` | 否 | 评论偏移 ID（用于带评论链接的分页）|
 | `reverse` | 否 | 是否反序排序返回结果，默认 `false` |
 
@@ -347,7 +345,7 @@ docker stop tgfilebot
 | `limit` | 否 | 每页返回数量，默认 `20`，最大 `100` |
 | `filter` | 否 | 过滤文件大小，如 `10M`，仅返回大于此大小的文件，默认 `128K`（仅作用于视频文件；可对多个 `cname` 传入逗号分隔的多个值，与频道一一对应）|
 | `reverse` | 否 | 是否反序排列，默认 `false` |
-| `key` / `hash` / `uid` | 否* | 鉴权参数（同上） |
+| `key` / `hash` | 否* | 鉴权参数（同上） |
 
 **响应示例**:
 ```json
@@ -395,7 +393,7 @@ docker stop tgfilebot
 | `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件；可对多个频道传入逗号分隔的多个值，与频道一一对应）|
 | `reverse` | 否 | 是否反序排列，默认 `false` |
 | `cname` | 否 | 指定搜索的频道别名（逗号分隔多个），不指定则搜索所有已配置频道 |
-| `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
+| `key` / `hash` | 否* | 鉴权参数（同上）|
 
 **响应示例**:
 ```json
@@ -437,7 +435,7 @@ docker stop tgfilebot
 | `cid` 或 `cname` | 是 | 频道 ID 或用户名（两者二选一）|
 | `mid` | 是 | 消息ID |
 | `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件）|
-| `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
+| `key` / `hash` | 否* | 鉴权参数（同上）|
 
 **响应示例**:
 ```json
@@ -478,7 +476,7 @@ docker stop tgfilebot
 | `offset` | 否 | 评论的偏移 ID（用于分页）|
 | `page` | 否 | 页码，默认 `1` |
 | `filter` | 否 | 过滤文件大小，默认 `128K`（仅作用于视频文件）|
-| `key` / `hash` / `uid` | 否* | 鉴权参数（同上）|
+| `key` / `hash` | 否* | 鉴权参数（同上）|
 
 **响应示例**:
 ```json
@@ -513,16 +511,16 @@ docker stop tgfilebot
 | 鉴权方式 | URL 参数 | 说明 | 示例 |
 |:---|:---|:---|:---|
 | 明文密码 | `&key=yourpassword` | 直接传入配置中的 `password` 值 | `?key=mysecret123` |
-| 哈希密码 | `&hash=xxxxxx&uid=888888` | 更安全的方式，避免明文暴露密码 | `?hash=a1b2c3&uid=123456789` |
+| 哈希密码 | `&hash=xxxxxx` | 更安全的方式，避免明文暴露密码 | `?hash=a1b2c3` |
 
-**Hash 计算公式**: `md5(uid + password)` 的前 **6 位**十六进制字符串。
+**Hash 计算公式**: `md5(uid + password)` 的前 **6 位**十六进制字符串。这里的 `uid` 是离线计算 hash 时使用的用户 ID，不是 HTTP 请求参数。
 
 **计算示例**:
 ```
 uid = 8888
 password = mypass
 md5("8888mypass") = "7c......" → 前 6 位为 "7c..."
-最终 URL 参数: ?hash=7c....&uid=8888
+最终 URL 参数: ?hash=7c....
 ```
 
 Python 示例代码：
@@ -533,7 +531,7 @@ uid = 8888
 password = "mypass"
 hash_input = str(uid) + password
 hash_value = hashlib.md5(hash_input.encode()).hexdigest()[:6]
-print(f"?hash={hash_value}&uid={uid}")
+print(f"?hash={hash_value}")
 ```
 
 ---
@@ -671,7 +669,7 @@ import hashlib
 uid = 123456789
 password = "mypass"
 hash_val = hashlib.md5(f"{uid}{password}".encode()).hexdigest()[:6]
-# 使用: ?hash={hash_val}&uid={uid}
+# 使用: ?hash={hash_val}
 ```
 
 ### 问题 5：并发搜索超时

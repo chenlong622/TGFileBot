@@ -100,7 +100,7 @@ func cloneConf(c *Conf) *Conf {
 	return &nc
 }
 
-// refreshConf 以写者互斥的方式克隆当前配置、应用 mutate 中的修改、原子发布新快照并持久化到磁盘。
+// refreshConf 以写者互斥的方式克隆当前配置、应用 mutate 中的修改，并在持久化成功后原子发布新快照。
 // mutate 可以放心地修改传入的副本（含对 slice 字段的增删), 不会影响其他 goroutine 正在并发
 // 读取的旧快照——infos.Conf.Load() 拿到的要么是完整的旧配置, 要么是完整的新配置, 不会读到中间状态。
 func (infos *Infos) refreshConf(mutate func(c *Conf)) error {
@@ -109,8 +109,11 @@ func (infos *Infos) refreshConf(mutate func(c *Conf)) error {
 
 	newConf := cloneConf(infos.Conf.Load())
 	mutate(newConf)
+	if err := saveConf(newConf, infos.FilesPath); err != nil {
+		return err
+	}
 	infos.Conf.Store(newConf)
-	return saveConf(newConf, infos.FilesPath)
+	return nil
 }
 
 // saveConf 将当前的配置信息序列化并保存到 config.json 文件中

@@ -21,6 +21,16 @@ import (
 // name 段只允许路径分隔符 / 以外的任意字符（含 . _ % 空格 中文等), 原有 [a-zA-Z0-9]+ 会拒绝含这些字符的文件名
 var streamPathRe = regexp.MustCompile(`/stream/(\d+)/[^/]+`)
 
+const timeoutRes = 60 * time.Second
+
+func writeResChunk(w http.ResponseWriter, content []byte, now func() time.Time) (int, error) {
+	err := http.NewResponseController(w).SetWriteDeadline(now().Add(timeoutRes))
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		return 0, err
+	}
+	return w.Write(content)
+}
+
 // handleMain 是 HTTP 服务的主分发函数, 根据路径路由到不同的处理器
 func handleMain(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -196,66 +206,99 @@ func handleParams(r *http.Request) (result Params, err error) {
 	return result, nil
 }
 
-// handleRanHeader 解析 HTTP Range 头, 返回解析后的区间。
-// ok 为 false 表示区间语法合法但起点已超出文件末尾（如 bytes=A- 且 A >= size）,
-// 按 RFC 7233 调用方应返回 416 并携带 Content-Range: bytes */size;
-// 语法非法的 Range 则宽容地按整段读取处理（RFC 允许忽略非法 Range）
-func handleRanHeader(src string, size int64) (start, end int64, ok bool) {
+// handleRanHeader 将 Range 解析为 handler 可直接使用的完整读取、部分读取或不可满足状态。
+// 非 bytes 单范围语法会被忽略并按完整读取处理。
+func handleRanHeader(src string, size int64) (start, end int64, status int) {
 	if src == "" {
-		return 0, size - 1, true
+		return 0, size - 1, http.StatusOK
 	}
-	src = strings.TrimSpace(strings.TrimPrefix(src, "bytes="))
+	src = strings.TrimSpace(src)
+	if !strings.HasPrefix(src, "bytes=") {
+		return 0, size - 1, http.StatusOK
+	}
+	src = strings.TrimPrefix(src, "bytes=")
+	if strings.Contains(src, ",") {
+		return 0, size - 1, http.StatusOK
+	}
 
 	// 快速路径: bytes=0- 是最常见的整段读取请求, 免去拆分与整数解析
 	if src == "0-" && size > 0 {
-		return 0, size - 1, true
+		return 0, size - 1, http.StatusPartialContent
 	}
 
 	parts := strings.SplitN(src, "-", 2)
 	if len(parts) < 2 {
-		// 缺少 "-" 分隔符（非法或纯数字）, 整体视为从头读取
-		start, end = 0, size-1
-	} else if parts[0] == "" {
-		// bytes=-N: 请求文件末尾 N 字节
-		n, err := strconv.ParseInt(parts[1], 10, 64)
-		if err == nil && n > 0 {
-			start = size - n
-			if start < 0 {
-				start = 0
-			}
-			end = size - 1
-		} else {
-			start, end = 0, size-1
+		return 0, size - 1, http.StatusOK
+	}
+	parseNumber := func(value string) (int64, bool) {
+		if value == "" {
+			return 0, false
 		}
-	} else {
-		// bytes=A-B 或 bytes=A-
-		if n, err := strconv.ParseInt(parts[0], 10, 64); err == nil && n >= 0 {
-			if n >= size {
-				// 区间起点超出文件末尾: 无法满足, 返回 416 而不是退化为最后 1 字节
-				return n, size - 1, false
+		for _, r := range value {
+			if r < '0' || r > '9' {
+				return 0, false
 			}
-			start = n
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		return n, err == nil
+	}
+
+	if parts[0] == "" {
+		// bytes=-N: 请求文件末尾 N 字节
+		n, valid := parseNumber(parts[1])
+		if !valid {
+			return 0, size - 1, http.StatusOK
+		}
+		if n == 0 || size == 0 {
+			return size, size - 1, http.StatusRequestedRangeNotSatisfiable
+		}
+		start = size - n
+		if start < 0 {
+			start = 0
 		}
 		end = size - 1
+	} else {
+		// bytes=A-B 或 bytes=A-
+		n, valid := parseNumber(parts[0])
+		if !valid {
+			return 0, size - 1, http.StatusOK
+		}
+		if n >= size {
+			return n, size - 1, http.StatusRequestedRangeNotSatisfiable
+		}
+		start = n
+		end = size - 1
 		if parts[1] != "" {
-			if n, err := strconv.ParseInt(parts[1], 10, 64); err == nil {
-				end = n
+			n, valid := parseNumber(parts[1])
+			if !valid {
+				return 0, size - 1, http.StatusOK
 			}
+			end = n
 		}
 	}
 	if end >= size {
 		end = size - 1
 	}
 	if start > end {
-		start = end
+		return start, end, http.StatusRequestedRangeNotSatisfiable
 	}
-	return start, end, true
+	return start, end, http.StatusPartialContent
 }
 
-// write416 按 RFC 7233 返回 416 响应, 必须在 WriteHeader 前设置 Content-Range
-func write416(w http.ResponseWriter, size int64) {
+// writeOOR 按 RFC 7233 返回 416 响应, 必须在 WriteHeader 前设置 Content-Range
+func writeOOR(w http.ResponseWriter, size int64) {
 	w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", size))
 	http.Error(w, "请求范围不合法", http.StatusRequestedRangeNotSatisfiable)
+}
+
+func writeRanHeaders(w http.ResponseWriter, start, end, size int64, status int) {
+	if status == http.StatusPartialContent {
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	} else {
+		w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
+	}
+	w.WriteHeader(status)
 }
 
 func handlePic(w http.ResponseWriter, r *http.Request) {
@@ -588,6 +631,17 @@ func streamWaitTimeout() time.Duration {
 	return wait
 }
 
+func forwardSource(message *telegram.MessageObj) (channelID int64, postID int32, ok bool) {
+	if message == nil || message.FwdFrom == nil || message.FwdFrom.ChannelPost == 0 {
+		return 0, 0, false
+	}
+	channel, ok := message.FwdFrom.FromID.(*telegram.PeerChannel)
+	if !ok {
+		return 0, 0, false
+	}
+	return channel.ChannelID, message.FwdFrom.ChannelPost, true
+}
+
 // handleStream 处理来自 HTTP 的文件流式读取请求
 // 该函数实现了 Range 分段下载支持, 允许像播放普通 mp4 文件一样拖动进度条
 func handleStream(w http.ResponseWriter, r *http.Request) {
@@ -650,27 +704,26 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 	// 避免大文件分支（重定向源 post）与小文件分支（直接下载转发）行为分叉,
 	// 也避免媒体缓存键（源 post）与 msCache 键（转发消息）互相错位
 	streamCID, streamMID := params.CID, params.MID
-	if src.Message.FwdFrom != nil {
-		if ch, ok := src.Message.FwdFrom.FromID.(*telegram.PeerChannel); ok && src.Message.FwdFrom.ChannelPost != 0 {
-			srcCache, err := infos.handleMs(HandleMs{
-				CID:   ch.ChannelID,
-				MIDs:  []int32{src.Message.FwdFrom.ChannelPost},
-				Ctx:   r.Context(),
-				Cate:  cate,
-				Limit: 1,
-			})
-			if err != nil {
-				if infos.Conf.Load().DeBUG {
-					log.Printf("解析转发源消息失败, 回退到转发消息: %+v", err)
-				}
-			} else if sm := srcCache.load(); len(sm) > 0 && sm[0].File != nil {
-				msCache = srcCache
-				ms = sm
-				src = sm[0]
-				cate = srcCache.Cate
-				client = infos.cateClient(cate)
-				streamCID, streamMID = ch.ChannelID, src.Message.FwdFrom.ChannelPost
+	sourceCID, sourceMID, hasSource := forwardSource(src.Message)
+	if hasSource {
+		srcCache, err := infos.handleMs(HandleMs{
+			CID:   sourceCID,
+			MIDs:  []int32{sourceMID},
+			Ctx:   r.Context(),
+			Cate:  cate,
+			Limit: 1,
+		})
+		if err != nil {
+			if infos.Conf.Load().DeBUG {
+				log.Printf("解析转发源消息失败, 回退到转发消息: %+v", err)
 			}
+		} else if sm := srcCache.load(); len(sm) > 0 && sm[0].File != nil {
+			msCache = srcCache
+			ms = sm
+			src = sm[0]
+			cate = srcCache.Cate
+			client = infos.cateClient(cate)
+			streamCID, streamMID = sourceCID, sourceMID
 		}
 	}
 	size := src.File.Size
@@ -692,22 +745,16 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		// 与大文件分支一致地解析 Range 头, 避免小文件分支明明声明了 Accept-Ranges 却始终整体返回 200,
 		// 导致播放器/下载工具的 seek、断点续传在小文件上失效
 		ranHeader := r.Header.Get("Range")
-		start, end, rangeOK := handleRanHeader(ranHeader, size)
-		if !rangeOK {
-			write416(w, size)
+		start, end, rangeStatus := handleRanHeader(ranHeader, size)
+		if rangeStatus == http.StatusRequestedRangeNotSatisfiable {
+			writeOOR(w, size)
 			return
 		}
 
 		// HEAD 请求只需要头部信息, 文件大小已从消息元数据中获知, 无需真的向 Telegram 发起下载。
 		// 带 Range 时须返回 206, 与下方大文件分支保持一致, 否则断点续传/seek 探测会误判
 		if r.Method == http.MethodHead {
-			if ranHeader == "" {
-				w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			} else {
-				w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
-				w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
-				w.WriteHeader(http.StatusPartialContent)
-			}
+			writeRanHeaders(w, start, end, size, rangeStatus)
 			return
 		}
 
@@ -725,13 +772,13 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 		infos.connectStat(cate).touch()
 
 		content := buf.Bytes()
-		if ranHeader == "" {
+		if rangeStatus == http.StatusOK {
 			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 		} else {
 			// 下载到的内容以实际大小为准做边界保护, 防止 Telegram 返回的字节数与消息元数据里的 size 有出入导致越界。
 			// 实际内容为空时按 RFC 返回 416, 避免负下标/越界切片导致 panic 或响应退化
 			if len(content) == 0 {
-				write416(w, size)
+				writeOOR(w, size)
 				return
 			}
 			rangeStart, rangeEnd := start, end
@@ -749,8 +796,9 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Length", strconv.Itoa(len(content)))
 			w.WriteHeader(http.StatusPartialContent)
 		}
-		if n, err := w.Write(content); err != nil {
+		if n, err := writeResChunk(w, content, time.Now); err != nil {
 			log.Printf("写入长度 %d 的响应体失败: %+v", n, err)
+			return
 		}
 	} else {
 		// 创建新的 Stream 流管理对象
@@ -769,22 +817,14 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 		// 7. 处理 HTTP Range 请求（分段读取的核心逻辑）
 		ranHeader := r.Header.Get("Range")
-		start, end, rangeOK := handleRanHeader(ranHeader, size)
+		start, end, rangeStatus := handleRanHeader(ranHeader, size)
 		// 必须在写出任何响应头之前判定, 否则 416 无法替换已发送的 206
-		if !rangeOK {
-			write416(w, size)
+		if rangeStatus == http.StatusRequestedRangeNotSatisfiable {
+			writeOOR(w, size)
 			return
 		}
 
-		if ranHeader == "" {
-			w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
-			w.WriteHeader(http.StatusOK)
-		} else {
-			contentLength := end - start + 1
-			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
-			w.Header().Set("Content-Length", strconv.FormatInt(contentLength, 10))
-			w.WriteHeader(http.StatusPartialContent)
-		}
+		writeRanHeaders(w, start, end, size, rangeStatus)
 
 		// 提前发送 Header，重置客户端(ExoPlayer)连接超时倒计时
 		if flusher, ok := w.(http.Flusher); ok {
@@ -886,7 +926,7 @@ func handleStream(w http.ResponseWriter, r *http.Request) {
 
 						// 写入响应
 						if len(content) > 0 {
-							if _, err := w.Write(content); err != nil {
+							if _, err := writeResChunk(w, content, time.Now); err != nil {
 								log.Printf("写入文件流时出错: cid=%d, mid=%d, name=%s, err=%v", params.CID, params.MID, fileName, err)
 								return
 							}

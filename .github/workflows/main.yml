@@ -21,22 +21,22 @@ jobs:
     name: Build
     runs-on: ${{ matrix.platform }}
     steps:
-      - name: Setup Go
+      - name: 设置 GO 环境
         uses: actions/setup-go@v5
         with:
           go-version: ${{ matrix.go-version }}
 
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
         
-      - name: Bump Version and Push Tag
+      - name: 检查、推送新的标签
         id: bump
         uses: anothrNick/github-tag-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WITH_V: false  # 不生成带v前缀的标签，如1.0.0而非v1.0.0
           
-      - name: Update Dependencies
+      - name: 更新依赖
         env:
           GOPRIVATE: github.com/lm317379829/gogram
         run: |
@@ -44,16 +44,15 @@ jobs:
           go mod edit -replace github.com/amarnathcjd/gogram=github.com/lm317379829/gogram@latest
           go mod tidy
 
-      - name: Build Go
+      - name: 编译
         run: |
-          set +e
           GOOS=linux GOARCH=386 CGO_ENABLED=0 go build -ldflags "-s -w" -tags netgo -installsuffix netgo -o TGFileBot-linux-386
           GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags netgo -installsuffix netgo -o TGFileBot-linux-amd64
           GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags netgo -installsuffix netgo -o TGFileBot-linux-arm64
           GOOS=freebsd GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-s -w" -tags netgo -installsuffix netgo -o TGFileBot-freebsd-amd64
           echo ${{ steps.bump.outputs.new_tag }} >> TGFileBot-version
 
-      - name: Upload Go to Release
+      - name: 上传至 Releases
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -61,20 +60,20 @@ jobs:
           tag_name: ${{ steps.bump.outputs.new_tag }}
           files: ${{ github.workspace }}/TGFileBot-*
       
-      - name: Set up QEMU
+      - name: 设置 QEMU
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Docker Buildx
+      - name: 设置 Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to Docker Hub
+      - name: 登录 Docker Hub
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v2
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      - name: Extract Metadata
+      - name: 提取元数据
         id: meta
         uses: docker/metadata-action@v4
         with:
@@ -84,7 +83,7 @@ jobs:
             type=raw,value=latest
      
       # 构建并推送Docker镜像
-      - name: Build and Push
+      - name: 构建并推送 Docker 镜像
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,13 +94,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Delete Workflow Runs
+      - name: 删除旧的 Workflow Runs
         uses: Mattraks/delete-workflow-runs@v2
         with:
           retain_days: 1
           keep_minimum_runs: 3
 
-      - name: Remove Old Releases
+      - name: 删除旧的 Releases
         uses: dev-drprasad/delete-older-releases@v0.1.0
         with:
           keep_latest: 3

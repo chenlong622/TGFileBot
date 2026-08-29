@@ -31,6 +31,8 @@ func (infos *Infos) startBot() (err error) {
 		log.Printf("创建 Bot 客户端失败: %+v", err)
 		return err
 	}
+	published := false
+	defer releaseClient(client.Disconnect, &published)
 
 	// 连接 Bot
 	if err = client.Connect(); err != nil {
@@ -183,7 +185,14 @@ func (infos *Infos) startBot() (err error) {
 	}
 
 	infos.BotClient.Store(client)
+	published = true
 	return nil
+}
+
+func releaseClient(disconnect func() error, published *bool) {
+	if !*published {
+		_ = disconnect()
+	}
 }
 
 // userBotClient 创建并连接 UserBot 客户端（不执行登录, 仅建立连接）
@@ -291,8 +300,24 @@ func (infos *Infos) startUserBot(phone string) (err error) {
 			}
 		}()
 	}
-
 	return nil
+}
+
+const timeoutQR = 30 * time.Second
+
+func (infos *Infos) selectionsQR() telegram.QrOptions {
+	return telegram.QrOptions{
+		PasswordCallback: infos.pass,
+		Timeout:          int32(timeoutQR / time.Second),
+	}
+}
+
+func noteQR() string {
+	return fmt.Sprintf("请使用手机 Telegram 扫描此二维码登录。二维码有效期 %d 秒, 如失效请重新发送 /qr", int(timeoutQR/time.Second))
+}
+
+func mesQRTTL() int {
+	return int(timeoutQR/time.Second) + 5
 }
 
 // startUserBotQR 发起二维码登录流程
@@ -336,9 +361,7 @@ func (infos *Infos) startUserBotQR() (err error) {
 		go func() {
 			defer infos.LoMu.Unlock()
 
-			qr, err := infos.UserClient.Load().QRLogin(telegram.QrOptions{
-				PasswordCallback: infos.pass,
-			})
+			qr, err := infos.UserClient.Load().QRLogin(infos.selectionsQR())
 			if err != nil {
 				log.Printf("获取 QR 登录失败: %+v", err)
 				// 账号开启 2FA 时 exportLoginToken 直接报 SESSION_PASSWORD_NEEDED,
@@ -356,7 +379,9 @@ func (infos *Infos) startUserBotQR() (err error) {
 			png, err := qr.ExportAsPng()
 			if err != nil {
 				log.Printf("导出 QR PNG 失败: %+v", err)
-				return
+				if infos.finishQR(err) {
+					return
+				}
 			}
 
 			src, err := infos.BotClient.Load().UploadFile(png, &telegram.UploadOptions{
@@ -364,16 +389,15 @@ func (infos *Infos) startUserBotQR() (err error) {
 			})
 			if err != nil {
 				log.Printf("上传 QR 文件失败: %+v", err)
-				return
-			}
-			sendMS(nil, src, &telegram.SendOptions{Caption: "请使用手机 Telegram 扫描此二维码登录。二维码有效期 30 秒, 如失效请重新发送 /qr"}, 35)
-			err = qr.WaitLogin()
-			if err != nil {
-				if !strings.Contains(err.Error(), "scanning again") {
-					sendMS(nil, fmt.Sprintf("QR 登录失败: %+v", err), nil, 60)
-					infos.resetStatus()
+				if infos.finishQR(err) {
 					return
 				}
+			}
+			sendMS(nil, src, &telegram.SendOptions{Caption: noteQR()}, mesQRTTL())
+			if infos.handleQRWaitLoginResult(qr.WaitLogin(), func(err error) {
+				sendMS(nil, fmt.Sprintf("QR 登录失败: %+v", err), nil, 60)
+			}) {
+				return
 			}
 
 			if err := infos.checkStatus(); err != nil {
@@ -390,37 +414,72 @@ func (infos *Infos) startUserBotQR() (err error) {
 // checkStatus 获取当前 UserBot 登录状态并校验 ID 是否合法
 func (infos *Infos) checkStatus() (err error) {
 	// 登录成功
-	me, err := infos.UserClient.Load().GetMe()
-	if err != nil {
+	me, getMeErr := infos.UserClient.Load().GetMe()
+	if err = checkUser(me, getMeErr, infos.Conf.Load().UserID); err != nil {
 		log.Printf("获取用户信息失败: %+v", err)
 		infos.Mutex.Lock()
 		infos.Status.Store(0)
 		infos.Mutex.Unlock()
-		return nil
-	}
-
-	if me.ID == infos.Conf.Load().UserID {
-		name := me.FirstName + me.LastName
-		if me.Username != "" {
-			name = "@" + me.Username
+		if getMeErr != nil || me == nil {
+			return err
 		}
-		src := fmt.Sprintf("登录成功! 用户: %s", name)
-		log.Print(src)
-		sendMS(nil, src, nil)
-		infos.Mutex.Lock()
-		infos.Status.Store(3)
-		infos.Mutex.Unlock()
-		return nil
-	} else {
 		log.Printf("登录失败: 用户ID不匹配, 期望 %d, 实际 %d", infos.Conf.Load().UserID, me.ID)
 		if client := infos.UserClient.Load(); client != nil {
-			if err := client.Disconnect(); err != nil {
-				log.Printf("UserBot 退出失败: %+v", err)
+			if disconnectErr := client.Disconnect(); disconnectErr != nil {
+				log.Printf("UserBot 退出失败: %+v", disconnectErr)
 			}
 		}
 		infos.resetStatus()
-		return infos.userBotClient()
+		return combineErrors(err, infos.userBotClient())
 	}
+
+	name := me.FirstName + me.LastName
+	if me.Username != "" {
+		name = "@" + me.Username
+	}
+	src := fmt.Sprintf("登录成功! 用户: %s", name)
+	log.Print(src)
+	sendMS(nil, src, nil)
+	infos.Mutex.Lock()
+	infos.Status.Store(3)
+	infos.Mutex.Unlock()
+	return nil
+}
+
+func checkUser(me *telegram.UserObj, err error, expectedID int64) error {
+	if err != nil {
+		return fmt.Errorf("获取用户信息: %w", err)
+	}
+	if me == nil {
+		return errors.New("获取用户信息为空")
+	}
+	if me.ID != expectedID {
+		return fmt.Errorf("用户ID不匹配, 期望 %d, 实际 %d", expectedID, me.ID)
+	}
+	return nil
+}
+
+func combineErrors(validationErr, rebuildErr error) error {
+	if rebuildErr == nil {
+		return validationErr
+	}
+	return errors.Join(validationErr, rebuildErr)
+}
+
+func (infos *Infos) finishQR(err error) bool {
+	if err == nil {
+		return false
+	}
+	infos.resetStatus()
+	return true
+}
+
+func (infos *Infos) handleQRWaitLoginResult(err error, report func(error)) bool {
+	if err == nil || strings.Contains(err.Error(), "scanning again") {
+		return false
+	}
+	report(err)
+	return infos.finishQR(err)
 }
 
 // resetStatus 断开 UserBot 连接并清理 session/cache, 将状态重置为未登录
@@ -554,6 +613,20 @@ func (infos *Infos) wakeTCP(client *telegram.Client, cate string) error {
 	if client == nil {
 		return errors.New("client 不能为 nil")
 	}
+	return infos.wakeTCPClient(client, cate)
+}
+
+type connectClient interface {
+	Ping(context.Context) (time.Duration, error)
+	Disconnect() error
+	Connect() error
+}
+
+func (infos *Infos) wakeTCPClient(client connectClient, cate string) error {
+	mu := infos.connectMu(cate)
+	mu.Lock()
+	defer mu.Unlock()
+
 	debug := infos.Conf.Load().DeBUG
 
 	// 设置较短超时
@@ -573,6 +646,7 @@ func (infos *Infos) wakeTCP(client *telegram.Client, cate string) error {
 		// 重连
 		if err := client.Connect(); err != nil {
 			log.Printf("重连 TCP 失败: %+v", err)
+			infos.connectStat(cate).markDead()
 			return err
 		}
 		// 重连后再次验证，必须使用全新的 context，防止使用已过期的旧 context
@@ -580,6 +654,7 @@ func (infos *Infos) wakeTCP(client *telegram.Client, cate string) error {
 		defer newCancel()
 		if value, err := client.Ping(newCtx); err != nil {
 			log.Printf("重连 TCP 后验证失败: %+v", err)
+			infos.connectStat(cate).markDead()
 			return err
 		} else {
 			if debug {
@@ -614,10 +689,11 @@ func botConf(cate string) (conf telegram.ClientConfig) {
 		},
 		FloodHandler: func(ctx context.Context, err error) bool {
 			wait, _ := infos.handleFloodWait(err.Error())
-			log.Printf("访问太过频繁, 等待 %d 秒后重试", wait+1)
+			waitDuration := floodWaitDuration(wait)
+			log.Printf("访问太过频繁, 等待 %d 秒后重试", int64(waitDuration/time.Second))
 			infos.advanceWaitUntil(wait)
 
-			timer := time.NewTimer(time.Duration(wait+1) * time.Second)
+			timer := time.NewTimer(waitDuration)
 			defer timer.Stop()
 			select {
 			case <-ctx.Done():
@@ -646,6 +722,18 @@ func infoLevel(debug bool) telegram.LogLevel {
 	return telegram.LogError
 }
 
+// maxFloodWaitDuration includes the one-second retry margin.
+const maxFloodWaitDuration = 24 * time.Hour
+
+func floodWaitDuration(wait int) time.Duration {
+	if wait < 0 {
+		wait = 0
+	} else if wait >= int(maxFloodWaitDuration/time.Second)-1 {
+		return maxFloodWaitDuration
+	}
+	return time.Duration(wait+1) * time.Second
+}
+
 // handleFloodWait 解析错误文本中的 FLOOD_WAIT 等待秒数; matched 表示正则是否命中（即应视为 Flood 处理）
 func (infos *Infos) handleFloodWait(errSrc string) (wait int, matched bool) {
 	wait = 3
@@ -655,10 +743,13 @@ func (infos *Infos) handleFloodWait(errSrc string) (wait int, matched bool) {
 	if matched {
 		for _, match := range matches[1:] {
 			if match != "" {
-				if value, err := strconv.Atoi(match); err == nil {
+				maxWaitSeconds := int(maxFloodWaitDuration/time.Second) - 1
+				if value, err := strconv.Atoi(match); err == nil && value <= maxWaitSeconds {
 					wait = value
-					break
+				} else {
+					wait = maxWaitSeconds
 				}
+				break
 			}
 		}
 	} else {
@@ -669,9 +760,16 @@ func (infos *Infos) handleFloodWait(errSrc string) (wait int, matched bool) {
 
 // advanceWaitUntil 只增不减地推进全局 FloodWait 截止时间, 避免后续短等待覆盖仍在生效的长等待
 func (infos *Infos) advanceWaitUntil(wait int) {
-	waitUntil := time.Now().Add(time.Duration(wait+1) * time.Second)
-	if currentWait := infos.WaitUntil.Load(); waitUntil.Unix() > currentWait {
-		infos.WaitUntil.Store(waitUntil.Unix())
+	waitUntil := time.Now().Add(floodWaitDuration(wait))
+	infos.advanceWaitUntilUnix(waitUntil.Unix())
+}
+
+func (infos *Infos) advanceWaitUntilUnix(candidate int64) {
+	for {
+		current := infos.WaitUntil.Load()
+		if candidate <= current || infos.WaitUntil.CompareAndSwap(current, candidate) {
+			return
+		}
 	}
 }
 
@@ -777,8 +875,9 @@ func (infos *Infos) list(channel string, page, limit int, offset int32, filter i
 			}
 			if num == maxNum {
 				infos.Mutex.Lock()
-				evictOldestLatestGroup(infos.LatestGroups, infos.MaxChannel)
-				infos.LatestGroups[channel] = &LatestGroup{Count: count, MIDs: newMIDs, Time: time.Now()}
+				if evictOldestLatestGID(infos.LatestGroups, infos.MaxChannel) {
+					infos.LatestGroups[channel] = &LatestGroup{Count: count, MIDs: newMIDs, Time: time.Now()}
+				}
 				infos.Mutex.Unlock()
 			}
 		} else {
@@ -1039,15 +1138,17 @@ func (infos *Infos) handleMs(params HandleMs) (result *MsCache, err error) {
 			// 首页列表/搜索: 缓存一切非空结果（含不足一页的末尾页), 结合短 TTL 命中
 			if len(ms) > 0 {
 				infos.Mutex.Lock()
-				evictOldestMsCache(infos.MsCache, infos.MaxMs)
-				infos.MsCache[kname] = result
+				if evictOldestMsCache(infos.MsCache, infos.MaxMs) {
+					infos.MsCache[kname] = result
+				}
 				infos.Mutex.Unlock()
 			}
 		} else if len(ms) == params.Limit {
 			// 锚点请求（带 MIDs/OffsetID）仅在取满一页时缓存, 语义与修改前保持一致
 			infos.Mutex.Lock()
-			evictOldestMsCache(infos.MsCache, infos.MaxMs)
-			infos.MsCache[kname] = result
+			if evictOldestMsCache(infos.MsCache, infos.MaxMs) {
+				infos.MsCache[kname] = result
+			}
 			infos.Mutex.Unlock()
 		}
 	}
@@ -1156,6 +1257,9 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 			}
 		} else {
 			client := infos.UserClient.Load()
+			if client == nil {
+				return result, errors.New("UserBot 客户端未就绪")
+			}
 			values, err := client.ResolvePeer(channel)
 			if err != nil {
 				go func() {
@@ -1199,8 +1303,9 @@ func (infos *Infos) handleChannel(channel string, hash ...int64) (result Channel
 			}
 			result.Time = time.Now()
 			infos.Mutex.Lock()
-			evictOldestChannelCache(infos.ChannelID, infos.MaxChannel)
-			infos.ChannelID[channel] = &result
+			if evictOldestChannelCache(infos.ChannelID, infos.MaxChannel) {
+				infos.ChannelID[channel] = &result
+			}
 			infos.Mutex.Unlock()
 		}
 	} else {
@@ -1350,30 +1455,36 @@ func (infos *Infos) handleComments(mid, offset int32, page, limit int, base []te
 // handleLinks 处理消息媒体, 返回直链
 func handleLinks(res HackLink, item Item) (link string, err error) {
 	conf := infos.Conf.Load()
-	link = fmt.Sprintf("%s/stream?cid=%v&mid=%d&cate=user", strings.TrimSuffix(conf.Site, "/"), item.CID, item.MID)
-	if item.Username != "" {
-		link += fmt.Sprintf("&cname=%s", item.Username)
+	params := StreamLinkParams{
+		CID:   item.CID,
+		MID:   item.MID,
+		Cate:  "user",
+		CName: item.Username,
 	}
 
 	if conf.Password != "" {
 		if res.M != nil {
-			// 开启密码保护时链接需要携带发送者的 hash/uid 鉴权,
+			// 开启密码保护时链接需要携带发送者的 hash 鉴权,
 			// 频道帖子没有个人发送者(SenderID 为 0), 无法生成有效直链;
 			// 不能回退用管理员 UID, 否则等于把管理员 ID 泄露给链接接收方
 			if res.M.SenderID() == 0 {
 				return "", errors.New("消息没有个人发送者, 无法生成带鉴权的直链")
 			}
-			link += fmt.Sprintf("&hash=%s&uid=%d", infos.calculateHash(res.M.SenderID()), res.M.SenderID())
+			params.Hash = infos.calculateHash(res.M.SenderID())
 		} else {
 			switch {
-			case res.Hash != "" && res.UID != 0:
-				link += fmt.Sprintf("&hash=%s&uid=%d", res.Hash, res.UID)
+			case res.Hash != "":
+				params.Hash = res.Hash
 			case res.Pass != "":
-				link += fmt.Sprintf("&key=%s", res.Pass)
+				params.Key = res.Pass
 			default:
 				log.Print("未提供密码或哈希")
 			}
 		}
+	}
+	link, err = buildStreamLink(conf.Site, params)
+	if err != nil {
+		return "", err
 	}
 	return link, nil
 }

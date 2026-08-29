@@ -110,7 +110,7 @@ func (stream *Stream) start(contentStart, contentEnd int64) {
 
 // download 是工作协程的核心逻辑, 负责循环领取并下载文件分片
 func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
-	cacheKey := mediaCacheKey(stream.CID, stream.MID)
+	cacheKey := mediaCacheName(stream.CID, stream.MID)
 	defer func() {
 		if len(stream.Pools) > numTask-1 {
 			if pool := stream.Pools[numTask-1]; pool != nil {
@@ -282,11 +282,12 @@ func (stream *Stream) download(numTask int, contentStart, contentEnd int64) {
 					continue
 				default:
 					if wait, flood := infos.handleFloodWait(errStr); flood {
+						waitDuration := floodWaitDuration(wait)
 						if infos.Conf.Load().DeBUG {
-							log.Printf("协程%d: 访问太过频繁, 等待 %d 秒后重试", numTask, wait+1)
+							log.Printf("协程%d: 访问太过频繁, 等待 %d 秒后重试", numTask, int64(waitDuration/time.Second))
 						}
 						infos.advanceWaitUntil(wait)
-						timer := time.NewTimer(time.Duration(wait+1) * time.Second)
+						timer := time.NewTimer(waitDuration)
 						select {
 						case <-stream.Ctx.Done():
 							timer.Stop() // 取消时显式停止并释放定时器资源
@@ -572,7 +573,9 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 				}
 			}
 		} else {
-			evictOldestMediaCache(infos.HeadCache, infos.MaxMedia)
+			if !evictOldestMediaCache(infos.HeadCache, infos.MaxMedia) {
+				return false
+			}
 			contents := make([]MediaContent, 0, int(stream.HeadSize/stream.ChunkSize))
 			infos.HeadCache[cacheKey] = &MediaCache{Contents: contents, Time: time.Now()}
 			if infos.Conf.Load().DeBUG {
@@ -592,7 +595,9 @@ func (stream *Stream) handleCache(task *Task, cacheKey string, offset, contentEn
 				}
 			}
 		} else {
-			evictOldestMediaCache(infos.TailCache, infos.MaxMedia)
+			if !evictOldestMediaCache(infos.TailCache, infos.MaxMedia) {
+				return false
+			}
 			contents := make([]MediaContent, 0, int(stream.TailSize/stream.ChunkSize))
 			infos.TailCache[cacheKey] = &MediaCache{Contents: contents, Time: time.Now()}
 			if infos.Conf.Load().DeBUG {

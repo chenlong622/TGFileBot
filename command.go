@@ -98,6 +98,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 					}
 				}); err != nil {
 					log.Printf("保存配置文件失败: %+v", err)
+					sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+					return nil
 				}
 
 				if !added {
@@ -148,18 +150,18 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 
 			var whiteID int64
-			var successMsg string
+			var successMes string
 			found := false
 			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if index >= 0 && index < len(c.WhiteIDs) {
 						whiteID = c.WhiteIDs[index]
-						successMsg = fmt.Sprintf("按索引移除白名单成功: %d", whiteID)
+						successMes = fmt.Sprintf("按索引移除白名单成功: %d", whiteID)
 						found = true
 					}
 				} else if num != 0 && slices.Contains(c.WhiteIDs, num) {
 					whiteID = num
-					successMsg = fmt.Sprintf("按ID移除白名单成功: %d", whiteID)
+					successMes = fmt.Sprintf("按ID移除白名单成功: %d", whiteID)
 					found = true
 				}
 				if found {
@@ -169,6 +171,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 
 			if !found {
@@ -203,7 +207,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}
 			infos.Mutex.Unlock()
-			sendMS(m, successMsg, nil, 60)
+			sendMS(m, successMes, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/qr"):
 			if m.SenderID() != conf.UserID {
@@ -287,6 +291,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.DC = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			sendMS(m, fmt.Sprintf("DC已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
@@ -305,6 +311,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Site = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			sendMS(m, fmt.Sprintf("反代地址已设置为: %s", content), nil, 60)
 			return nil
@@ -324,6 +332,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.MaxSize = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			src := fmt.Sprintf("最大缓存已设置为: %s", formatFileSize(value))
 			if value > 128*1024*1024 {
@@ -354,6 +364,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Proxy = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			sendMS(m, fmt.Sprintf("代理已设置为: %s", content), nil, 60)
 			return nil
@@ -368,12 +380,14 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Password = content }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			// 密码变化会改变每个 uid 对应的哈希, 需要整体重建反查表
 			infos.Mutex.Lock()
 			infos.rebuildHashIndex()
 			infos.Mutex.Unlock()
-			sendMS(m, "密码已更新, 重启后生效", nil, 60)
+			sendMS(m, "密码已更新", nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/channel"):
 			if !infos.needAdmin(m) {
@@ -394,6 +408,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.ChannelID = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			sendMS(m, fmt.Sprintf("频道ID已设置为: %d", value), nil, 60)
 			return nil
@@ -417,6 +433,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Workers = num }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			src := fmt.Sprintf("并发数已设置为: %d", num)
 			if num > 4 {
@@ -470,6 +488,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 
 			if !added {
@@ -497,18 +517,18 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				index, indexErr = strconv.Atoi(indexStr)
 			}
 
-			var removed, successMsg string
+			var removed, successMes string
 			found := false
 			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if indexErr == nil && index >= 0 && index < len(c.Channels) {
 						removed = c.Channels[index]
-						successMsg = fmt.Sprintf("按索引移除频道成功: %s", removed)
+						successMes = fmt.Sprintf("按索引移除频道成功: %s", removed)
 						found = true
 					}
 				} else if slices.Contains(c.Channels, channelByName) {
 					removed = channelByName
-					successMsg = fmt.Sprintf("按内容移除频道成功: %s", channelByName)
+					successMes = fmt.Sprintf("按内容移除频道成功: %s", channelByName)
 					found = true
 				}
 				if found {
@@ -518,6 +538,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 
 			if !found {
@@ -532,7 +554,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 				return nil
 			}
-			sendMS(m, successMsg, nil, 60)
+			sendMS(m, successMes, nil, 60)
 			return nil
 		case strings.HasPrefix(text, "/list"):
 			if !infos.needAdmin(m) {
@@ -610,6 +632,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 			}
 			if err := infos.refreshConf(func(c *Conf) { c.Port = value }); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 			sendMS(m, fmt.Sprintf("端口已设置为: %d, 重启后生效", value), nil, 60)
 			return nil
@@ -687,6 +711,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 
 			if !added {
@@ -714,18 +740,18 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				index, indexErr = strconv.Atoi(indexStr)
 			}
 
-			var removed, successMsg string
+			var removed, successMes string
 			found := false
 			if err := infos.refreshConf(func(c *Conf) {
 				if byIndex {
 					if indexErr == nil && index >= 0 && index < len(c.Rules) {
 						removed = c.Rules[index]
-						successMsg = fmt.Sprintf("按索引移除规则成功: %s", removed)
+						successMes = fmt.Sprintf("按索引移除规则成功: %s", removed)
 						found = true
 					}
 				} else if slices.Contains(c.Rules, content) {
 					removed = content
-					successMsg = "按内容移除规则成功"
+					successMes = "按内容移除规则成功"
 					found = true
 				}
 				if found {
@@ -735,6 +761,8 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				}
 			}); err != nil {
 				log.Printf("保存配置文件失败: %+v", err)
+				sendMS(m, fmt.Sprintf("保存配置失败: %+v", err), nil, 60)
+				return nil
 			}
 
 			if !found {
@@ -746,7 +774,7 @@ func handleBotCommand(m *telegram.NewMessage) error {
 				return nil
 			}
 			infos.buildRexRules()
-			sendMS(m, successMsg, nil, 60)
+			sendMS(m, successMes, nil, 60)
 			return nil
 		default:
 			if !infos.isWhite(m.SenderID()) && m.SenderID() != 0 {
@@ -763,19 +791,28 @@ func handleBotCommand(m *telegram.NewMessage) error {
 func handleMess(m *telegram.NewMessage) error {
 	// 如果是用户发送或转发来的、带有图片/文档/视频的消息，直接生成直链
 	if m.IsMedia() && (m.Photo() != nil || m.Document() != nil || m.Video() != nil) {
-		// 开启密码保护时链接需要携带发送者的 hash/uid 鉴权,
+		conf := infos.Conf.Load()
+		// 开启密码保护时链接需要携带发送者的 hash 鉴权,
 		// 频道帖子没有个人发送者(SenderID 为 0), 无法生成有效直链;
 		// 不能回退用管理员 UID, 否则等于把管理员 ID 泄露给链接接收方
-		if infos.Conf.Load().Password != "" && m.SenderID() == 0 {
+		if conf.Password != "" && m.SenderID() == 0 {
 			sendMS(m, "频道帖子没有个人发送者, 无法生成带鉴权的直链", nil, 60)
 			return nil
 		}
-		link := fmt.Sprintf("%s/stream?cid=%d&mid=%d&cate=bot", strings.TrimSuffix(infos.Conf.Load().Site, "/"), m.ChatID(), m.ID)
-		if m.Channel != nil && m.Channel.Username != "" {
-			link += fmt.Sprintf("&cname=%s", m.Channel.Username)
+		params := StreamLinkParams{
+			CID:  m.ChatID(),
+			MID:  m.ID,
+			Cate: "bot",
 		}
-		if infos.Conf.Load().Password != "" {
-			link += fmt.Sprintf("&hash=%s&uid=%d", infos.calculateHash(m.SenderID()), m.SenderID())
+		if m.Channel != nil && m.Channel.Username != "" {
+			params.CName = m.Channel.Username
+		}
+		if conf.Password != "" {
+			params.Hash = infos.calculateHash(m.SenderID())
+		}
+		link, err := buildStreamLink(conf.Site, params)
+		if err != nil {
+			return err
 		}
 		links := []string{link}
 		return sendLink(m, links)
@@ -826,7 +863,7 @@ func handleMess(m *telegram.NewMessage) error {
 		link, err := handleLinks(res, item)
 		if err != nil {
 			log.Printf("生成直链失败: cid=%d, mid=%d, err=%+v", item.CID, item.MID, err)
-			continue
+			return err
 		}
 		links = append(links, link)
 	}

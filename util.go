@@ -286,11 +286,14 @@ func handleClientIP(r *http.Request) string {
 	return "未知IP"
 }
 
-// evictOldest 当 cache map 超过 maxCount 时删除最旧的一条, timeOf 用于取出每个条目的时间戳。
-// label 仅用于日志, 标明淘汰的是哪种缓存。
-func evictOldest[T any](cache map[string]*T, maxCount int, timeOf func(*T) time.Time, label string) {
-	if len(cache) <= maxCount {
-		return
+// evictOldest 为下一次插入腾出容量。返回 false 表示容量禁用，调用方不得插入。
+func evictOldest[T any](cache map[string]*T, maxCount int, timeOf func(*T) time.Time, label string) bool {
+	if maxCount <= 0 {
+		clear(cache)
+		return false
+	}
+	if len(cache) < maxCount {
+		return true
 	}
 	var oldestKey string
 	var oldestTime time.Time
@@ -305,26 +308,27 @@ func evictOldest[T any](cache map[string]*T, maxCount int, timeOf func(*T) time.
 		delete(cache, oldestKey)
 		log.Printf("%s已淘汰最旧条目: key=%s", label, oldestKey)
 	}
+	return true
 }
 
-func evictOldestMediaCache(cache map[string]*MediaCache, maxCount int) {
-	evictOldest(cache, maxCount, func(v *MediaCache) time.Time { return v.Time }, "媒体缓存")
+func evictOldestMediaCache(cache map[string]*MediaCache, maxCount int) bool {
+	return evictOldest(cache, maxCount, func(v *MediaCache) time.Time { return v.Time }, "媒体缓存")
 }
 
-func evictOldestMsCache(cache map[string]*MsCache, maxCount int) {
-	evictOldest(cache, maxCount, func(v *MsCache) time.Time { return v.Time }, "消息缓存")
+func evictOldestMsCache(cache map[string]*MsCache, maxCount int) bool {
+	return evictOldest(cache, maxCount, func(v *MsCache) time.Time { return v.Time }, "消息缓存")
 }
 
-func evictOldestChannelCache(cache map[string]*ChannelInfo, maxCount int) {
-	evictOldest(cache, maxCount, func(v *ChannelInfo) time.Time { return v.Time }, "频道缓存")
+func evictOldestChannelCache(cache map[string]*ChannelInfo, maxCount int) bool {
+	return evictOldest(cache, maxCount, func(v *ChannelInfo) time.Time { return v.Time }, "频道缓存")
 }
 
-func evictOldestLatestGroup(cache map[string]*LatestGroup, maxCount int) {
-	evictOldest(cache, maxCount, func(v *LatestGroup) time.Time { return v.Time }, "相册去重缓存")
+func evictOldestLatestGID(cache map[string]*LatestGroup, maxCount int) bool {
+	return evictOldest(cache, maxCount, func(v *LatestGroup) time.Time { return v.Time }, "相册去重缓存")
 }
 
-// mediaCacheKey 生成缓存 key
-func mediaCacheKey(cid int64, mid int32) string {
+// mediaCacheName 生成缓存 key
+func mediaCacheName(cid int64, mid int32) string {
 	return fmt.Sprintf("%d:%d", cid, mid)
 }
 

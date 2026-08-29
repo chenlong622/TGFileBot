@@ -245,8 +245,7 @@ Core download interface, supports HTTP Range requests, enabling drag-and-play in
 | `cate` | No | Download client selection: `user` (uses UserBot, can access private channels) or `bot` (default). Automatically falls back to Bot if UserBot is not logged in |
 | `download` | No | Set to `true` to download as attachment (`Content-Disposition: attachment`), otherwise plays inline |
 | `key` | No* | Plaintext access password (required if `password` is set, mutually exclusive with hash) |
-| `hash` | No* | Hash authentication based on user ID (required if `password` is set), `uid` must also be provided |
-| `uid` | No* | Must provide corresponding User ID when using `hash` authentication |
+| `hash` | No* | Hash authentication (required if `password` is set) |
 
 **Features**:
 - Supports HTTP Range requests (206 Partial Content)
@@ -271,7 +270,7 @@ Gets the maximum size thumbnail of the specified Telegram media file (video, ima
 | `cname` | No | Channel username/alias (e.g., `@mychannel`); either this or `cid` (choose one) |
 | `mid` | Yes | Message ID (positive integer) |
 | `cate` | No | Download client selection: `user` (uses UserBot) or `bot` (default) |
-| `key` / `hash` / `uid` | No* | Authentication parameters (required if `password` is set) |
+| `key` / `hash` | No* | Authentication parameters (required if `password` is set) |
 
 > This interface usually returns an `image/jpeg` format. If the message has no thumbnail, it returns `404 Not Found`.
 
@@ -283,7 +282,7 @@ Parses Telegram message links into direct links; supports private and public cha
 
 **URL Format**:
 ```
-/link?link={TG_LINK}&key={key}&uid={uid}&hash={hash}
+/link?link={TG_LINK}&key={key}&hash={hash}
 ```
 
 | Parameter | Required | Description |
@@ -291,7 +290,6 @@ Parses Telegram message links into direct links; supports private and public cha
 | `link` | Yes | Complete Telegram message link, formatted as `https://t.me/c/{cid}/{mid}` or `https://t.me/{username}/{mid}` |
 | `key` | No* | Plaintext access password (mutually exclusive with hash) |
 | `hash` | No* | Hash authentication (mutually exclusive with key) |
-| `uid` | No* | Corresponding user ID when using `hash` |
 | `offset` | No | Comment offset ID (for pagination with comment links) |
 | `reverse` | No | Whether to sort returned results in reverse, default `false` |
 
@@ -347,7 +345,7 @@ Gets the media list of a specified channel. UserBot must be logged in.
 | `limit` | No | Return quantity per page, default `20`, max `100` |
 | `filter` | No | Filter file size, e.g., `10M`, only returns files larger than this size, default `128K` (only applies to video files; can pass multiple comma-separated values for multiple `cname`, one per channel) |
 | `reverse` | No | Whether to sort in reverse, default `false` |
-| `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+| `key` / `hash` | No* | Authentication parameters (same as above) |
 
 **Response Example**:
 ```json
@@ -395,7 +393,7 @@ Concurrent full-text retrieval in configured search channels. UserBot must be lo
 | `filter` | No | Filter file size, default `128K` (only applies to video files; can pass multiple comma-separated values for multiple channels, one per channel) |
 | `reverse` | No | Whether to sort in reverse, default `false` |
 | `cname` | No | Specify search channel aliases (comma-separated). If not specified, searches all configured channels |
-| `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+| `key` / `hash` | No* | Authentication parameters (same as above) |
 
 **Response Example**:
 ```json
@@ -437,7 +435,7 @@ Used to obtain all files in a media group (multi-image/multi-video message) at o
 | `cid` or `cname` | Yes | Channel ID or username (choose one) |
 | `mid` | Yes | Message ID |
 | `filter` | No | Filter file size, default `128K` (only applies to video files) |
-| `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+| `key` / `hash` | No* | Authentication parameters (same as above) |
 
 **Response Example**:
 ```json
@@ -478,7 +476,7 @@ Extracts media files from a message's comment area.
 | `offset` | No | Comment offset ID (for pagination) |
 | `page` | No | Page number, default `1` |
 | `filter` | No | Filter file size, default `128K` (only applies to video files) |
-| `key` / `hash` / `uid` | No* | Authentication parameters (same as above) |
+| `key` / `hash` | No* | Authentication parameters (same as above) |
 
 **Response Example**:
 ```json
@@ -513,16 +511,16 @@ If `password` is configured, accessing all HTTP interfaces requires one of the f
 | Auth Method | URL Parameter | Description | Example |
 |:---|:---|:---|:---|
 | Plaintext password | `&key=yourpassword` | Pass the `password` value configured directly | `?key=mysecret123` |
-| Hash password | `&hash=xxxxxx&uid=888888` | More secure method, avoids exposing plaintext password | `?hash=a1b2c3&uid=123456789` |
+| Hash password | `&hash=xxxxxx` | More secure method, avoids exposing plaintext password | `?hash=a1b2c3` |
 
-**Hash calculation formula**: The first **6 characters** of the hexadecimal string of `md5(uid + password)`.
+**Hash calculation formula**: The first **6 characters** of the hexadecimal string of `md5(uid + password)`. The `uid` here is the user ID used when calculating the hash offline — it is NOT an HTTP request parameter.
 
 **Calculation Example**:
 ```
 uid = 8888
 password = mypass
 md5("8888mypass") = "7c......" → First 6 chars are "7c..."
-Final URL parameter: ?hash=7c....&uid=8888
+Final URL parameter: ?hash=7c....
 ```
 
 Python Example Code:
@@ -533,7 +531,7 @@ uid = 8888
 password = "mypass"
 hash_input = str(uid) + password
 hash_value = hashlib.md5(hash_input.encode()).hexdigest()[:6]
-print(f"?hash={hash_value}&uid={uid}")
+print(f"?hash={hash_value}")
 ```
 
 ---
@@ -671,7 +669,7 @@ import hashlib
 uid = 123456789
 password = "mypass"
 hash_val = hashlib.md5(f"{uid}{password}".encode()).hexdigest()[:6]
-# Use: ?hash={hash_val}&uid={uid}
+# Use: ?hash={hash_val}
 ```
 
 ### Issue 5: Concurrent Search Timeout

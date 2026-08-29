@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,6 +37,45 @@ type Params struct {
 	Keywords string
 	Filters  []int64
 	Channels []string
+}
+
+type StreamLinkParams struct {
+	CID   int64
+	MID   int32
+	Cate  string
+	CName string
+	Hash  string
+	Key   string
+}
+
+func buildStreamLink(site string, params StreamLinkParams) (string, error) {
+	parsed, err := url.Parse(site)
+	if err != nil {
+		return "", fmt.Errorf("解析站点地址: %w", err)
+	}
+	if (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", fmt.Errorf("站点地址必须是包含主机名的绝对 HTTP(S) URL: %q", site)
+	}
+
+	escapedPath := strings.TrimRight(parsed.EscapedPath(), "/") + "/stream"
+	path, err := url.PathUnescape(escapedPath)
+	if err != nil {
+		return "", fmt.Errorf("解析站点路径: %w", err)
+	}
+	parsed.Path = path
+	parsed.RawPath = escapedPath
+	parsed.Fragment = ""
+	parsed.RawFragment = ""
+
+	query := parsed.Query()
+	query.Set("cid", strconv.FormatInt(params.CID, 10))
+	query.Set("mid", strconv.FormatInt(int64(params.MID), 10))
+	query.Set("cate", params.Cate)
+	query.Set("cname", params.CName)
+	query.Set("hash", params.Hash)
+	query.Set("key", params.Key)
+	parsed.RawQuery = query.Encode()
+	return parsed.String(), nil
 }
 
 type ChannelInfo struct {
@@ -180,16 +220,19 @@ func (s *TCPStatu) touch() {
 	s.TCPDead.Store(false)
 }
 
+func (s *TCPStatu) markDead() {
+	s.TCPDead.Store(true)
+	s.WakeTime.Store(0)
+}
+
 // fail 标记 TCP 断开并清空唤醒时间, 使下一个请求强制走 wakeTCP 重连探活
 func (s *TCPStatu) fail(client *telegram.Client) {
 	if client != nil {
 		if !client.IsConnected() {
-			s.TCPDead.Store(true)
-			s.WakeTime.Store(0)
+			s.markDead()
 		}
 	} else {
-		s.TCPDead.Store(true)
-		s.WakeTime.Store(0)
+		s.markDead()
 	}
 }
 
@@ -231,6 +274,10 @@ type Infos struct {
 		Bot  TCPStatu
 		User TCPStatu
 	} // 记录TCP连接状态
+	WakeMu struct {
+		Bot  sync.Mutex
+		User sync.Mutex
+	} // 按客户端类别串行化探活与重连, 不占用全局缓存锁
 }
 
 // connectStat 按类别返回对应的 TCP 探活状态, 用于收敛调用方重复的 switch cate 判断
@@ -239,6 +286,13 @@ func (infos *Infos) connectStat(cate string) *TCPStatu {
 		return &infos.TCPStatus.User
 	}
 	return &infos.TCPStatus.Bot
+}
+
+func (infos *Infos) connectMu(cate string) *sync.Mutex {
+	if cate == "user" {
+		return &infos.WakeMu.User
+	}
+	return &infos.WakeMu.Bot
 }
 
 var infos *Infos

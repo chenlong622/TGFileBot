@@ -5,10 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log"
-	handleUrl "net/url"
+	"net/url"
 	"sort"
-	"strconv"
 
 	"github.com/amarnathcjd/gogram/telegram"
 )
@@ -120,7 +118,7 @@ func (infos *Infos) checkHash(hash string) int64 {
 }
 
 // checkPass 验证 HTTP 请求中的访问密码或哈希
-func checkPass(params handleUrl.Values) error {
+func checkPass(params url.Values) error {
 	confPassword := infos.Conf.Load().Password
 	if confPassword != "" {
 		hash := params.Get("hash") // 基于用户 ID 的哈希校验
@@ -131,16 +129,22 @@ func checkPass(params handleUrl.Values) error {
 				return errors.New("无效的密码")
 			}
 		case hash != "":
-			value := params.Get("uid")
-			uid, err := strconv.ParseInt(value, 10, 64)
-			if err == nil && uid != 0 {
-				if hash != infos.calculateHash(uid) {
-					return errors.New("无效的哈希密码")
-				}
-			} else {
-				log.Printf("UID无效: %s", value)
-				return errors.New("无效的UID")
+			uid := infos.checkHash(hash)
+			if uid == 0 {
+				return errors.New("无效的哈希")
 			}
+			/*
+				value := params.Get("uid")
+				uid, err := strconv.ParseInt(value, 10, 64)
+				if err == nil && uid != 0 {
+					if hash != infos.calculateHash(uid) {
+						return errors.New("无效的哈希密码")
+					}
+				} else {
+					log.Printf("UID无效: %s", value)
+					return errors.New("无效的UID")
+				}
+			*/
 		default:
 			return errors.New("您没有权限访问此链接")
 		}
